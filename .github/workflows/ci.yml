@@ -37,7 +37,7 @@ jobs:
         run: |
           git clone https://github.com/livepeer/livepeer-python-gateway.git "$PYTHON_RUNNER_SDK_DIR"
           git -C "$PYTHON_RUNNER_SDK_DIR" checkout --detach 44df06157fcdb864e37d971e8caba86b2a7dc92e
-          uv sync --project "$PYTHON_RUNNER_SDK_DIR" --locked --no-dev --python 3.12
+          uv sync --project "$PYTHON_RUNNER_SDK_DIR" --locked --no-dev --extra examples --python 3.12
       - name: Race and real-process tests
         run: |
           mkdir -p "${{ runner.temp }}/livepeer-test-artifacts"
