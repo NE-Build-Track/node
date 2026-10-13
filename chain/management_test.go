@@ -149,7 +149,7 @@ func newManagementFixture(t *testing.T) *managementFixture {
 					f.simulationHook(input.From, input.To, input.Data, input.Value)
 				}
 				if f.failSimulation == method.Name {
-					http.Error(w, "unavailable", 503)
+					http.Error(w, "unavailable", http.StatusServiceUnavailable)
 					return
 				}
 				// All staking hints must be prepared from the already confirmed state.

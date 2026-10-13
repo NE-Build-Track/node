@@ -154,10 +154,10 @@ func (o *eventOutbox) enqueue(ctx context.Context, event signingEvent) (count in
 		return 0, err
 	}
 	if inserted, _ := result.RowsAffected(); inserted == 0 {
+		// Not ready until enough space is available.
 		o.capacityNeeded.Store(int64(len(payload)))
 		return 0, errOutboxFull
 	}
-	o.capacityNeeded.Store(0)
 	return stats.Count, nil
 }
 

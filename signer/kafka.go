@@ -76,10 +76,10 @@ func (c KafkaConfig) Validate() error {
 		return errors.New("--kafka-outbox-max-bytes must be positive")
 	}
 	if (c.Username == "") != (c.Password == "") || (c.UsernameFile != "" || c.PasswordFile != "") && (c.Username == "" || c.Password == "") {
-		return errors.New("Kafka username and password must be supplied together: set LIVEPEER_SIGNER_KAFKA_USERNAME and LIVEPEER_SIGNER_KAFKA_PASSWORD, or use --kafka-username-file and --kafka-password-file")
+		return errors.New("kafka username and password must be supplied together: set LIVEPEER_SIGNER_KAFKA_USERNAME and LIVEPEER_SIGNER_KAFKA_PASSWORD, or use --kafka-username-file and --kafka-password-file")
 	}
 	if strings.ContainsRune(c.Username, 0) || strings.ContainsRune(c.Password, 0) {
-		return errors.New("Kafka credentials must not contain NUL bytes; check LIVEPEER_SIGNER_KAFKA_USERNAME or --kafka-username-file and LIVEPEER_SIGNER_KAFKA_PASSWORD or --kafka-password-file")
+		return errors.New("kafka credentials must not contain NUL bytes; check LIVEPEER_SIGNER_KAFKA_USERNAME or --kafka-username-file and LIVEPEER_SIGNER_KAFKA_PASSWORD or --kafka-password-file")
 	}
 	_, err := c.transport()
 	return err

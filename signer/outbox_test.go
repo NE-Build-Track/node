@@ -155,6 +155,7 @@ func TestOutboxCapacityConcurrentAdmissionAndRecovery(t *testing.T) {
 	require.NoError(t, p.outbox.acknowledge(t.Context(), pending[:1]))
 	require.True(t, p.ready(t.Context()))
 	require.NoError(t, p.Enqueue(t.Context(), testEvent()))
+	require.False(t, p.ready(t.Context()))
 	require.Equal(t, uint64(9), p.enqueueFailures.Load())
 	var metrics bytes.Buffer
 	p.metrics(t.Context(), &metrics)
