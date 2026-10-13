@@ -2,11 +2,7 @@
 // by Yondon Fu, Nico Vergauwen, and Rafał Leszko. Source history is retained.
 package pm
 
-import (
-	"math/big"
-
-	ethcommon "github.com/ethereum/go-ethereum/common"
-)
+import ethcommon "github.com/ethereum/go-ethereum/common"
 
 // TicketStore is an interface which describes an object capable
 // of persisting tickets
@@ -23,7 +19,4 @@ type TicketStore interface {
 
 	// WinningTicketCount returns the amount of non-redeemed winning tickets for a payer in the TicketStore
 	WinningTicketCount(payer ethcommon.Address, minCreationRound int64) (int, error)
-
-	// IsOrchActive returns true if the given orchestrator addr is active in the given round
-	IsOrchActive(addr ethcommon.Address, round *big.Int) (bool, error)
 }

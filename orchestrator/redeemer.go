@@ -133,9 +133,6 @@ func ProcessRedemptions(ctx context.Context, store *RedeemerDB, chain eth.Paymen
 		if err != nil {
 			failures = append(failures, err)
 		} else {
-			if err := store.SetOrchestratorActive(redeemer.Address(), snapshot.Round, active); err != nil {
-				failures = append(failures, err)
-			}
 			if active {
 				failures = append(failures, RedeemPending(ctx, store, chain, redeemer, chainID, snapshot)...)
 			}

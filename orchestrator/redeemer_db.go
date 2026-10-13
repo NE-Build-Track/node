@@ -272,29 +272,6 @@ func (s *RedeemerDB) RemoveWinningTicket(t *pm.SignedTicket) error {
 	return err
 }
 
-// SetOrchestratorActive records an observed active status for a round; it is
-// not a finality assertion or a substitute for canonical chain reads.
-func (s *RedeemerDB) SetOrchestratorActive(addr ethcommon.Address, round *big.Int, active bool) error {
-	if round == nil || round.Sign() < 0 {
-		return errors.New("invalid round")
-	}
-	_, err := s.db.Exec(`INSERT INTO orchestrator_rounds(address,round,active) VALUES(?,?,?)
-		ON CONFLICT(address,round) DO UPDATE SET active=excluded.active`, addr.Hex(), round.String(), active)
-	return err
-}
-
-func (s *RedeemerDB) IsOrchActive(addr ethcommon.Address, round *big.Int) (bool, error) {
-	if round == nil || round.Sign() < 0 {
-		return false, errors.New("invalid round")
-	}
-	var active bool
-	err := s.db.QueryRow("SELECT active FROM orchestrator_rounds WHERE address=? AND round=?", addr.Hex(), round.String()).Scan(&active)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	return active, err
-}
-
 func (s *RedeemerDB) PendingPayers() ([]ethcommon.Address, error) {
 	rows, err := s.db.Query(`SELECT DISTINCT payer_address FROM winning_tickets WHERE tx_hash IS NULL AND sig NOT IN (SELECT sig FROM redemption_attempts)`)
 	if err != nil {

@@ -113,22 +113,3 @@ func TestRedemptionReceiptSettlesAttempt(t *testing.T) {
 		})
 	}
 }
-
-func TestSQLiteOrchestratorRoundView(t *testing.T) {
-	store, err := OpenRedeemerDB(filepath.Join(t.TempDir(), "recipient.sqlite"))
-	require.NoError(t, err)
-	defer store.Close()
-	addr := ethcommon.HexToAddress("0x1234")
-	round := big.NewInt(99)
-	active, err := store.IsOrchActive(addr, round)
-	require.NoError(t, err)
-	require.False(t, active)
-	require.NoError(t, store.SetOrchestratorActive(addr, round, true))
-	active, err = store.IsOrchActive(addr, round)
-	require.NoError(t, err)
-	require.True(t, active)
-	require.NoError(t, store.SetOrchestratorActive(addr, round, false))
-	active, err = store.IsOrchActive(addr, round)
-	require.NoError(t, err)
-	require.False(t, active)
-}
