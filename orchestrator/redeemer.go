@@ -74,6 +74,14 @@ func RedeemPending(ctx context.Context, store *RedeemerDB, chain eth.PaymentChai
 		if chain.Contracts == nil {
 			return append(failures, errors.New("redemption is not configured"))
 		}
+		active, err := chain.IsActiveAt(ctx, ticket.Recipient, snapshot)
+		if err != nil {
+			failures = append(failures, fmt.Errorf("payer %s: %w", payer.Hex(), err))
+			continue
+		}
+		if !active {
+			continue
+		}
 		chain.Contracts.SetNonceFloor(redeemer.Address(), floor)
 		prepared, err := chain.PrepareRedemptionAndStore(ctx, redeemer, chainID, redeemTicket, func(prepared eth.SignedTransaction) error {
 			return store.recordPrepared(ctx, ticket, prepared)
@@ -129,14 +137,7 @@ func ProcessRedemptions(ctx context.Context, store *RedeemerDB, chain eth.Paymen
 	if err != nil {
 		failures = append(failures, err)
 	} else {
-		active, err := chain.IsActiveAt(ctx, redeemer.Address(), snapshot)
-		if err != nil {
-			failures = append(failures, err)
-		} else {
-			if active {
-				failures = append(failures, RedeemPending(ctx, store, chain, redeemer, chainID, snapshot)...)
-			}
-		}
+		failures = append(failures, RedeemPending(ctx, store, chain, redeemer, chainID, snapshot)...)
 	}
 	failures = append(failures, ReconcileSubmitted(ctx, store, chain)...)
 	return failures

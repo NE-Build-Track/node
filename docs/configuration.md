@@ -127,7 +127,8 @@ local signing. Changing the keystore or password requires a service restart, or
 a new chain invocation.
 
 The signer account is the payer, supplying the TicketBroker deposit and reserve.
-The orchestrator account receives tickets and acts as redeemer. The chain account
+The orchestrator's keystore account signs redemptions and pays gas. Ticket payments
+credit `OrchestratorAddress`, which defaults to that account. The chain account
 must match the keystore account when signing. Keep a redemption key exclusive to
 its orchestrator worker; concurrent CLI or other use can conflict with nonce
 tracking.

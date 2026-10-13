@@ -15,6 +15,7 @@ Flags:
   -n, --network string                    Network name (custom networks require explicit chain settings) (env: LIVEPEER_ORCHESTRATOR_NETWORK) (default "offchain")
   -d, --data-dir string                   Component data directory; defaults to ~/.lpData/<network>/<component> (env: LIVEPEER_ORCHESTRATOR_DATA_DIR) (default "$HOME/.lpData/offchain/orchestrator")
   -a, --account string                    Keystore account address (env: LIVEPEER_ORCHESTRATOR_ACCOUNT)
+  -o, --orchestrator-address string       Registered orchestrator address receiving ticket payments; defaults to the keystore account (env: LIVEPEER_ORCHESTRATOR_ORCHESTRATOR_ADDRESS)
   -e, --eth-usd-feed string               ETH/USD oracle address, alternative to a fixed wei-per-usd rate (env: LIVEPEER_ORCHESTRATOR_ETH_USD_FEED)
   -p, --price-max-age duration            Maximum age of the oracle observation (env: LIVEPEER_ORCHESTRATOR_PRICE_MAX_AGE) (default 2h0m0s)
   -l, --listen string                     Public HTTP listener (env: LIVEPEER_ORCHESTRATOR_LISTEN) (default "127.0.0.1:8935")

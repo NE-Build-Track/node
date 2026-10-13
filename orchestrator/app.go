@@ -34,6 +34,7 @@ type Params struct {
 	ConfigFile string `name:"config" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables discovery"`
 	nodeconfig.Settings
 	Account              *ethcommon.Address `descr:"Keystore account address"`
+	OrchestratorAddress  *ethcommon.Address `descr:"Registered orchestrator address receiving ticket payments; defaults to the keystore account"`
 	ETHUSDFeed           *ethcommon.Address `name:"eth-usd-feed" descr:"ETH/USD oracle address, alternative to a fixed wei-per-usd rate"`
 	PriceMaxAge          time.Duration      `default:"2h" descr:"Maximum age of the oracle observation"`
 	Listen               netip.AddrPort     `default:"127.0.0.1:8935" descr:"Public HTTP listener"`
@@ -65,7 +66,7 @@ type Params struct {
 }
 
 func (p Params) paymentsRequested() bool {
-	return p.Account != nil || p.KeystoreFile != "" || p.KeystorePassword != nil || p.KeystorePasswordFile != "" || p.RedeemerDB != "" || p.RPCURL != nil || p.RPCURLFile != "" || p.ChainID != nil || p.Controller != nil || p.WeiPerUSD != nil || p.ETHUSDFeed != nil || p.TicketFaceValue != nil || p.TicketWinProb != nil || p.RedeemerMaxFeePerGas != nil
+	return p.Account != nil || p.OrchestratorAddress != nil || p.KeystoreFile != "" || p.KeystorePassword != nil || p.KeystorePasswordFile != "" || p.RedeemerDB != "" || p.RPCURL != nil || p.RPCURLFile != "" || p.ChainID != nil || p.Controller != nil || p.WeiPerUSD != nil || p.ETHUSDFeed != nil || p.TicketFaceValue != nil || p.TicketWinProb != nil || p.RedeemerMaxFeePerGas != nil
 }
 
 func (p Params) Validate() error {
@@ -75,6 +76,9 @@ func (p Params) Validate() error {
 	if p.paymentsRequested() {
 		if p.Network == "offchain" {
 			return errors.New("on-chain payments require an explicit on-chain --network (or LIVEPEER_ORCHESTRATOR_NETWORK), e.g. '--network arbitrum-one-mainnet'")
+		}
+		if p.OrchestratorAddress != nil && *p.OrchestratorAddress == (ethcommon.Address{}) {
+			return errors.New("--orchestrator-address must be a nonempty Ethereum address")
 		}
 		if p.KeystorePassword == nil && p.KeystorePasswordFile == "" || p.RedeemerDB == "" || p.RPCURL == nil || p.ChainID == nil || p.Controller == nil || (p.WeiPerUSD == nil && p.ETHUSDFeed == nil) || p.TicketFaceValue == nil || p.TicketWinProb == nil {
 			return errors.New("on-chain payment requires --redeemer-db, LIVEPEER_ORCHESTRATOR_KEYSTORE_PASSWORD or --keystore-password-file, LIVEPEER_ORCHESTRATOR_RPC_URL or --rpc-url-file, --chain-id, --controller-address, --wei-per-usd or --eth-usd-feed, --ticket-face-value and --ticket-win-prob")
@@ -185,7 +189,7 @@ func Root(out, errOut io.Writer) *cobra.Command {
 func printConfig(ctx *boa.HookContext, p *Params, out io.Writer) error {
 	// Only audited fields are printed; secrets and sensitive paths stay omitted.
 	values := map[string]any{
-		"Network": &p.Network, "Account": &p.Account,
+		"Network": &p.Network, "Account": &p.Account, "OrchestratorAddress": &p.OrchestratorAddress,
 		"Listen": &p.Listen, "MetricsListen": &p.MetricsListen,
 		"RunnerGrants": &p.RunnerGrants, "SessionProxyGrants": &p.SessionProxyGrants, "HealthGrants": &p.HealthGrants,
 		"HeartbeatInterval": &p.HeartbeatInterval, "HeartbeatTTL": &p.HeartbeatTTL,
@@ -286,7 +290,11 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 			}
 			registry.setRate(rate, until)
 		}
-		engine, err = NewPaymentEngine(redeemerDB, pm.EthereumChain{Client: paymentChain}, redeemerKey.Address(), p.TicketFaceValue.ToBig(), p.TicketWinProb.ToBig())
+		recipient := redeemerKey.Address()
+		if p.OrchestratorAddress != nil {
+			recipient = *p.OrchestratorAddress
+		}
+		engine, err = NewPaymentEngine(redeemerDB, pm.EthereumChain{Client: paymentChain}, recipient, p.TicketFaceValue.ToBig(), p.TicketWinProb.ToBig())
 		if err != nil {
 			return fmt.Errorf("initialize payment engine (check --account, --ticket-face-value and --ticket-win-prob): %w", err)
 		}

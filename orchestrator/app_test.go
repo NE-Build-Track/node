@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,8 +25,10 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
 	"github.com/j0sh/boa/pkg/boa"
+	"github.com/livepeer/node/eth"
 	"github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/nodeconfig"
+	"github.com/livepeer/node/pm/wire"
 	"github.com/stretchr/testify/require"
 )
 
@@ -48,61 +51,99 @@ func freeTCPPort(t *testing.T) int {
 }
 
 func TestPaidHTTPStartup(t *testing.T) {
-	mainPort, metricsPort := freeTCPPort(t), freeTCPPort(t)
-	address := fmt.Sprintf("http://127.0.0.1:%d", mainPort)
-	var requests atomic.Int32
-	rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests.Add(1)
-		var req struct {
-			Method string
-			ID     json.RawMessage
-		}
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
-		require.Equal(t, "eth_chainId", req.Method)
-		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": "0x1"}))
-	}))
-	defer rpc.Close()
-	p := paymentKeystoreParams(t, rpc.URL)
-	p.KeystoreFile, p.KeystorePasswordFile = test.WriteKeystore(t, nil)
-	p.Listen = netip.MustParseAddrPort(fmt.Sprintf("0.0.0.0:%d", mainPort))
-	p.MetricsListen = netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", metricsPort))
-	p.ServiceURL = boa.Text[*url.URL]{Value: mustURL(t, "https://public.example/external")}
-	p.RunnerConfig = filepath.Join(t.TempDir(), "runners.toml")
-	require.NoError(t, os.WriteFile(p.RunnerConfig, []byte("[[Runners]]\nID = 'r'\nRunnerURL = 'https://runner.example'\nApp = 'test'\n[Runners.PriceInfo]\nPrice = 1\n"), 0600))
-	require.NoError(t, p.Validate())
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- Serve(ctx, p, io.Discard) }()
-	t.Cleanup(func() {
-		cancel()
-		select {
-		case err := <-done:
+	for _, separate := range []bool{false, true} {
+		t.Run(fmt.Sprintf("separate-wallet=%t", separate), func(t *testing.T) {
+			mainPort, metricsPort := freeTCPPort(t), freeTCPPort(t)
+			address := fmt.Sprintf("http://127.0.0.1:%d", mainPort)
+			p := paymentKeystoreParams(t, "http://127.0.0.1:1")
+			p.KeystoreFile, p.KeystorePasswordFile = test.WriteFixedKeystore(t)
+			key, err := eth.OpenKeystoreFile(p.KeystoreFile, p.KeystorePasswordFile)
 			require.NoError(t, err)
-		case <-time.After(3 * time.Second):
-			t.Error("orchestrator did not stop")
-		}
-	})
-	require.Eventually(t, func() bool {
-		response, err := http.Get(address + "/external/discovery")
-		if err != nil {
-			return false
-		}
-		defer response.Body.Close()
-		return response.StatusCode == http.StatusOK
-	}, 5*time.Second, 20*time.Millisecond)
-	require.EqualValues(t, 1, requests.Load())
-	require.FileExists(t, p.RedeemerDB)
-	response, err := http.Get("http://" + p.MetricsListen.String() + "/readyz")
-	require.NoError(t, err)
-	response.Body.Close()
-	require.Equal(t, http.StatusOK, response.StatusCode)
-	response, err = http.Get(address + "/external/discovery")
-	require.NoError(t, err)
-	defer response.Body.Close()
-	var entries []discoveryEntry
-	require.NoError(t, json.NewDecoder(response.Body).Decode(&entries))
-	require.Len(t, entries, 1)
-	require.Equal(t, p.ServiceURL.String(), entries[0].Address)
+			recipient := key.Address()
+			if separate {
+				recipient = ethcommon.HexToAddress("0x1234")
+				p.OrchestratorAddress = &recipient
+			}
+			var requests atomic.Int32
+			rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				var req struct {
+					Method string
+					ID     json.RawMessage
+				}
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+				var result any = "0x1"
+				switch req.Method {
+				case "eth_chainId":
+				case "eth_getBlockByNumber":
+					result = map[string]string{"number": "0x32", "hash": ethcommon.HexToHash("0xabcd").Hex()}
+				case "eth_call":
+					// Reuse the 32-byte encoding of 1 for calls returning an address, round, hash, or bool.
+					result = fmt.Sprintf("0x%064x", 1)
+				default:
+					t.Errorf("unexpected RPC %s", req.Method)
+				}
+				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}))
+			}))
+			defer rpc.Close()
+			p.RPCURL = mustURL(t, rpc.URL)
+			p.Listen = netip.MustParseAddrPort(fmt.Sprintf("0.0.0.0:%d", mainPort))
+			p.MetricsListen = netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", metricsPort))
+			p.ServiceURL = boa.Text[*url.URL]{Value: mustURL(t, "https://public.example/external")}
+			p.RunnerConfig = filepath.Join(t.TempDir(), "runners.toml")
+			require.NoError(t, os.WriteFile(p.RunnerConfig, []byte("[[Runners]]\nID = 'r'\nRunnerURL = 'https://runner.example'\nApp = 'test'\n[Runners.PriceInfo]\nPrice = 1\n"), 0600))
+			require.NoError(t, p.Validate())
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- Serve(ctx, p, io.Discard) }()
+			t.Cleanup(func() {
+				cancel()
+				select {
+				case err := <-done:
+					require.NoError(t, err)
+				case <-time.After(3 * time.Second):
+					t.Error("orchestrator did not stop")
+				}
+			})
+			require.Eventually(t, func() bool {
+				response, err := http.Get(address + "/external/discovery")
+				if err != nil {
+					return false
+				}
+				defer response.Body.Close()
+				return response.StatusCode == http.StatusOK
+			}, 5*time.Second, 20*time.Millisecond)
+			require.EqualValues(t, 1, requests.Load())
+			require.FileExists(t, p.RedeemerDB)
+			response, err := http.Get("http://" + p.MetricsListen.String() + "/readyz")
+			require.NoError(t, err)
+			response.Body.Close()
+			require.Equal(t, http.StatusOK, response.StatusCode)
+			response, err = http.Get(address + "/external/discovery")
+			require.NoError(t, err)
+			defer response.Body.Close()
+			var entries []discoveryEntry
+			require.NoError(t, json.NewDecoder(response.Body).Decode(&entries))
+			require.Len(t, entries, 1)
+			require.Equal(t, p.ServiceURL.String(), entries[0].Address)
+			payer := paymentTestKey(t)
+			request, err := http.NewRequest(http.MethodPost, address+"/external/apps/r/session", nil)
+			require.NoError(t, err)
+			request.Header.Set("Livepeer-Payer-Address", payer.Address().Hex())
+			response, err = http.DefaultClient.Do(request)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			require.Equal(t, http.StatusPaymentRequired, response.StatusCode)
+			var challenge Challenge
+			require.NoError(t, json.NewDecoder(response.Body).Decode(&challenge))
+			encoded, err := base64.StdEncoding.DecodeString(challenge.PaymentParams)
+			require.NoError(t, err)
+			info, err := wire.DecodeOrchestratorInfo(encoded)
+			require.NoError(t, err)
+			require.Equal(t, recipient.Bytes(), info.Address)
+			require.Equal(t, recipient.Bytes(), info.TicketParams.Recipient)
+		})
+	}
 }
 
 func TestConfigPrecedenceAndRedaction(t *testing.T) {
@@ -115,6 +156,7 @@ Listen = '127.0.0.1:8000'
 RedeemerMaxFeePerGas = '100'
 ChainID = 1
 Controller = '0x0000000000000000000000000000000000000001'
+OrchestratorAddress = '0x0000000000000000000000000000000000000011'
 WeiPerUSD = '1/2'
 KeystoreFile = '/missing/account.json'
 `)
@@ -139,6 +181,7 @@ KeystoreFile = '/missing/account.json'
 			require.NoError(t, toml.Unmarshal([]byte(output), &printed))
 			require.EqualValues(t, 3, printed["ChainID"])
 			require.Equal(t, "0x0000000000000000000000000000000000000003", printed["Controller"])
+			require.Equal(t, "0x0000000000000000000000000000000000000011", printed["OrchestratorAddress"])
 			require.Equal(t, "2/3", printed["WeiPerUSD"])
 			require.Equal(t, "5s", printed["HeartbeatInterval"])
 			for _, key := range []string{"ServiceURL", "RPCURL", "BootstrapSecret", "KeystoreFile", "KeystorePassword", "KeystorePasswordFile", "RunnerConfig", "TicketFaceValue"} {
@@ -247,6 +290,10 @@ func TestValidationBeforeStartup(t *testing.T) {
 	require.ErrorContains(t, err, "loopback")
 	require.True(t, boa.IsUserInputError(err))
 
+	_, err = execute(t, "--orchestrator-address", "0x0000000000000000000000000000000000000001")
+	require.ErrorContains(t, err, "on-chain payments require")
+	_, err = execute(t, "--network", "test", "--orchestrator-address", "0x0000000000000000000000000000000000000000")
+	require.ErrorContains(t, err, "orchestrator-address must be a nonempty")
 	p := paymentKeystoreParams(t, "http://127.0.0.1:1")
 	p.KeystoreFile, p.KeystorePasswordFile = "/missing/key", "/missing/password"
 	p.TicketWinProb = new(uint256.Int).SetAllOne()

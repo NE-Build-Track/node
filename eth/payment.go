@@ -184,8 +184,8 @@ func (c PaymentChain) PrepareRedemptionAndStore(ctx context.Context, redeemer *K
 }
 
 func (c PaymentChain) prepareRedemption(ctx context.Context, redeemer *Key, chainID *big.Int, t RedeemTicket, save func(SignedTransaction) error) (SignedTransaction, error) {
-	if redeemer == nil || redeemer.Address() != t.Recipient || t.FaceValue == nil || t.WinProb == nil || t.RecipientRand == nil {
-		return SignedTransaction{}, errors.New("redeemer account does not match ticket recipient")
+	if redeemer == nil || t.Recipient == (ethcommon.Address{}) || t.FaceValue == nil || t.WinProb == nil || t.RecipientRand == nil {
+		return SignedTransaction{}, errors.New("incomplete redemption configuration or ticket")
 	}
 	address, err := c.Contracts.Resolve(ctx, "ticketBroker")
 	if err != nil {

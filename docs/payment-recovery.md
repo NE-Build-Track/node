@@ -49,7 +49,9 @@ replicas with the same key and webhook configuration; outbox files must not be s
 
 ## Orchestrator transaction recovery
 
-The orchestrator account is the redeemer. Redemption attempts use these states:
+The keystore account signs redemptions; tickets retain their original recipient,
+even if `OrchestratorAddress` or the keystore account changes. Redemption attempts
+use these states:
 
 | State | Meaning and recovery |
 | --- | --- |

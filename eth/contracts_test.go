@@ -21,7 +21,7 @@ func TestRedemptionSubmission(t *testing.T) {
 	controller, broker, sender := common.HexToAddress("0x1000"), common.HexToAddress("0x2000"), common.HexToAddress("0x3000")
 	auxData, err := hexutil.Decode("0x" + word(5) + common.HexToHash("0xabcd").Hex()[2:])
 	require.NoError(t, err)
-	ticket := RedeemTicket{Recipient: key.Address(), Sender: sender, FaceValue: big.NewInt(10), WinProb: big.NewInt(100), SenderNonce: 4294967295, RecipientRandHash: common.HexToHash("0x4000"), AuxData: auxData, Signature: []byte{1, 2, 3}, RecipientRand: big.NewInt(4)}
+	ticket := RedeemTicket{Recipient: common.HexToAddress("0x5000"), Sender: sender, FaceValue: big.NewInt(10), WinProb: big.NewInt(100), SenderNonce: 4294967295, RecipientRandHash: common.HexToHash("0x4000"), AuxData: auxData, Signature: []byte{1, 2, 3}, RecipientRand: big.NewInt(4)}
 	// Independent encoding checks tuple fields, sender-nonce widening, and the
 	// offsets and contents of auxiliary data and the signature.
 	wantData := calldata("redeemWinningTicket((address,address,uint256,uint256,uint256,bytes32,bytes),bytes,uint256)",
@@ -42,7 +42,7 @@ func TestRedemptionSubmission(t *testing.T) {
 				result = "0x" + addressWord(broker)
 			} else {
 				require.JSONEq(t, `"pending"`, string(params[1]))
-				require.Equal(t, ticket.Recipient, call.From)
+				require.Equal(t, key.Address(), call.From)
 				require.Equal(t, broker, call.To)
 				require.Equal(t, wantData, call.Input)
 				result = "0x"
@@ -61,6 +61,9 @@ func TestRedemptionSubmission(t *testing.T) {
 			var tx types.Transaction
 			require.NoError(t, tx.UnmarshalBinary(raw))
 			require.Equal(t, wantData, hexutil.Encode(tx.Data()))
+			from, err := types.Sender(types.LatestSignerForChainID(big.NewInt(1)), &tx)
+			require.NoError(t, err)
+			require.Equal(t, key.Address(), from)
 			sentHash = tx.Hash()
 			result = sentHash
 		default:

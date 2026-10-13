@@ -100,7 +100,7 @@ a lowercase DNS label of at most 63 characters.
 
 For paid operation, select an on-chain `Network` and supply:
 
-- An account and its password; see
+- A redemption account and its password; see
   [Ethereum keystores](configuration.md#ethereum-keystores).
 - `RPCURLFile` or `LIVEPEER_ORCHESTRATOR_RPC_URL`: RPC credential.
 - `ChainID` and `Controller` for custom networks.
@@ -111,8 +111,12 @@ For paid operation, select an on-chain `Network` and supply:
 The payment database has a [default path](configuration.md); `RedeemerDB` /
 `--redeemer-db` overrides it.
 
-Incomplete paid configuration fails startup. The recipient must be active on
-the configured chain. Runner prices use USD per hour for live work or USD per
+Set `OrchestratorAddress` / `--orchestrator-address` to the registered public
+address to keep the orchestrator key offline. The keystore account pays gas;
+tickets credit the orchestrator.
+
+Incomplete paid configuration fails startup. The orchestrator address must be active
+on the configured chain. Runner prices use USD per hour for live work or USD per
 fixed request. Hourly discovery prices are normalized to USD and wei per second.
 
 `WeiPerUSD` sets a fixed conversion. Alternatively, set `ETHUSDFeed` to a

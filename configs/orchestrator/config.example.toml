@@ -22,6 +22,7 @@ HealthGrants = []
 # chain. The fee ceiling and PriceMaxAge are optional. See docs/orchestrator.md.
 # Network = "arbitrum-one-mainnet" # Default: offchain.
 # Account = "0xYOUR_ACCOUNT" # Select among shared accounts.
+# OrchestratorAddress = "0xYOUR_REGISTERED_ORCHESTRATOR" # Defaults to the keystore account; only its public address is needed.
 # RedeemerDB = "payments.sqlite" # Default under the data directory.
 # KeystoreFile = "/run/secrets/livepeer-orchestrator-keystore.json" # Override discovery.
 # KeystorePasswordFile = "/run/secrets/livepeer-orchestrator-keystore-password"
