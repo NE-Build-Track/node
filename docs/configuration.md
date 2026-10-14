@@ -66,13 +66,11 @@ redemption `--submit` are also command-line-only controls.
 
 ## Destination grants
 
-Grants permit connections to local, private, or other restricted addresses;
-public destinations need none. Each grant matches a hostname and port for one
-purpose, such as runner traffic or signer discovery, including redirects.
+Grants allow local, private, or other restricted destinations; public addresses
+need none. Permissions apply per purpose, including redirects.
 
-Grants use `host[:port]`, optionally prefixed with `http://` or `https://`.
-The scheme defaults to HTTPS; omitted ports default to 443 for HTTPS or 80 for
-HTTP.
+All `*-grants` accept a literal IP or `IP:port` (`[IPv6]:port` for IPv6).
+A bare IP permits any port at that address, but not hostnames that resolve to it.
 
 ## Credential files
 

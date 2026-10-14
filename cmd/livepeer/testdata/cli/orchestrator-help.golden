@@ -35,9 +35,9 @@ Flags:
   -w, --wei-per-usd string                 (env: LIVEPEER_ORCHESTRATOR_WEI_PER_USD)
   -t, --ticket-face-value string           (env: LIVEPEER_ORCHESTRATOR_TICKET_FACE_VALUE)
       --ticket-win-prob string             (env: LIVEPEER_ORCHESTRATOR_TICKET_WIN_PROB)
-      --runner-grants strings             Exact private runner host:port grants (env: LIVEPEER_ORCHESTRATOR_RUNNER_GRANTS)
-      --session-proxy-grants strings      Exact private generated proxy target grants (env: LIVEPEER_ORCHESTRATOR_SESSION_PROXY_GRANTS)
-      --health-grants strings             Exact private static runner health grants (env: LIVEPEER_ORCHESTRATOR_HEALTH_GRANTS)
+      --runner-grants strings             Private runner IP[:port] grants (env: LIVEPEER_ORCHESTRATOR_RUNNER_GRANTS)
+      --session-proxy-grants strings      Private session proxy IP[:port] grants (env: LIVEPEER_ORCHESTRATOR_SESSION_PROXY_GRANTS)
+      --health-grants strings             Private static runner health IP[:port] grants (env: LIVEPEER_ORCHESTRATOR_HEALTH_GRANTS)
       --heartbeat-interval duration       Runner heartbeat interval (env: LIVEPEER_ORCHESTRATOR_HEARTBEAT_INTERVAL) (default 5s)
       --heartbeat-ttl duration            Runner heartbeat expiry (env: LIVEPEER_ORCHESTRATOR_HEARTBEAT_TTL) (default 30s)
       --print-config                      Print audited redacted TOML configuration

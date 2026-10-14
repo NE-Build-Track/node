@@ -57,9 +57,9 @@ type Params struct {
 	WeiPerUSD            *big.Rat
 	TicketFaceValue      *uint256.Int
 	TicketWinProb        *uint256.Int
-	RunnerGrants         []string      `optional:"true" descr:"Exact private runner host:port grants"`
-	SessionProxyGrants   []string      `optional:"true" descr:"Exact private generated proxy target grants"`
-	HealthGrants         []string      `optional:"true" descr:"Exact private static runner health grants"`
+	RunnerGrants         []string      `optional:"true" descr:"Private runner IP[:port] grants"`
+	SessionProxyGrants   []string      `optional:"true" descr:"Private session proxy IP[:port] grants"`
+	HealthGrants         []string      `optional:"true" descr:"Private static runner health IP[:port] grants"`
 	HeartbeatInterval    time.Duration `default:"5s" descr:"Runner heartbeat interval"`
 	HeartbeatTTL         time.Duration `default:"30s" descr:"Runner heartbeat expiry"`
 	PrintConfig          bool          `optional:"true" boa:"noconfig,noenv" descr:"Print audited redacted TOML configuration"`

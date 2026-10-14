@@ -53,7 +53,7 @@ the corresponding setting to allow connections to local or private addresses:
 For a runner and health endpoint at `127.0.0.1:9000`, set both:
 
 ```toml
-RunnerGrants = ["127.0.0.1:9000"]
+RunnerGrants = ["127.0.0.1"]
 HealthGrants = ["127.0.0.1:9000"]
 ```
 

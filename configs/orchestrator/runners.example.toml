@@ -12,5 +12,3 @@ HealthCode = 200
 # ID = "0"
 # Name = "H100"
 # VRAMMB = 80000
-
-# Grant 127.0.0.1:9000 separately in RunnerGrants and HealthGrants.

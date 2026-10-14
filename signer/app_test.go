@@ -132,8 +132,8 @@ ETHUSDMaxAge = "1h"
 MaxHourlyPrice = "36"
 MaxFixedPrice = "1/2"
 MaxTicketEV = "3000000000000"
-Orchestrators = ["http://localhost:8935"]
-DiscoveryGrants = ["localhost:8935"]
+Orchestrators = ["http://127.0.0.1:8935"]
+DiscoveryGrants = ["127.0.0.1:8935"]
 `
 			configFile := filepath.Join(folder, "signer"+ext)
 			test.WriteConfig(t, configFile, config)
@@ -153,8 +153,8 @@ DiscoveryGrants = ["localhost:8935"]
 			require.Equal(t, big.NewRat(36, 1), p.MaxHourlyPrice)
 			require.Equal(t, big.NewRat(1, 2), p.MaxFixedPrice)
 			require.Equal(t, time.Hour, p.ETHUSDMaxAge)
-			require.Equal(t, "http://localhost:8935", p.Orchestrators[0].Value.String())
-			require.Equal(t, []string{"localhost:8935"}, p.DiscoveryGrants)
+			require.Equal(t, "http://127.0.0.1:8935", p.Orchestrators[0].Value.String())
+			require.Equal(t, []string{"127.0.0.1:8935"}, p.DiscoveryGrants)
 			require.NoError(t, p.Validate())
 		})
 	}
@@ -189,13 +189,12 @@ func TestSignerDiscoveryGrantConfiguration(t *testing.T) {
 		bad    bool
 	}{
 		{name: "omitted"},
-		{name: "CLI", args: []string{"--discovery-grants", "localhost:8935,[::1]:8935"}, want: []string{"localhost:8935", "[::1]:8935"}},
-		{name: "environment", env: "localhost:8935,[::1]:8935", want: []string{"localhost:8935", "[::1]:8935"}},
-		{name: "TOML", config: "DiscoveryGrants = ['localhost:8935', '[::1]:8935']\n", want: []string{"localhost:8935", "[::1]:8935"}},
-		{name: "default ports", args: []string{"--discovery-grants", "orch.internal,http://localhost"}, want: []string{"orch.internal", "http://localhost"}},
+		{name: "CLI", args: []string{"--discovery-grants", "127.0.0.1:8935,::1"}, want: []string{"127.0.0.1:8935", "::1"}},
+		{name: "environment", env: "127.0.0.1:8935,::1", want: []string{"127.0.0.1:8935", "::1"}},
+		{name: "TOML", config: "DiscoveryGrants = ['127.0.0.1:8935', '::1']\n", want: []string{"127.0.0.1:8935", "::1"}},
 		{name: "invalid CLI", args: []string{"--discovery-grants", "ftp://localhost"}, bad: true},
-		{name: "invalid environment", env: "localhost:0", bad: true},
-		{name: "invalid TOML", config: "DiscoveryGrants = ['localhost:65536']\n", bad: true},
+		{name: "invalid environment", env: "127.0.0.1:0", bad: true},
+		{name: "invalid TOML", config: "DiscoveryGrants = ['[::1]:65536']\n", bad: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("LIVEPEER_SIGNER_DISCOVERY_GRANTS", test.env)

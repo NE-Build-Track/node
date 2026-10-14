@@ -39,7 +39,7 @@ Flags:
       --keystore-file string               Encrypted geth account JSON file; otherwise discover in keystore/ (env: LIVEPEER_SIGNER_KEYSTORE_FILE)
       --keystore-password-file string      Owner-only file containing the exact keystore password bytes (env: LIVEPEER_SIGNER_KEYSTORE_PASSWORD_FILE)
   -o, --orchestrators strings               (env: LIVEPEER_SIGNER_ORCHESTRATORS)
-      --discovery-grants strings           Private discovery host[:port] grants (env: LIVEPEER_SIGNER_DISCOVERY_GRANTS)
+      --discovery-grants strings           Private discovery IP[:port] grants (env: LIVEPEER_SIGNER_DISCOVERY_GRANTS)
   -h, --help                               help for livepeer-signer
   -v, --version                            version for livepeer-signer
 

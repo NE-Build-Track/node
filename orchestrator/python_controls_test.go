@@ -13,7 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,13 +40,13 @@ func TestPinnedPythonRequestSessionControls(t *testing.T) {
 	}
 	python, export, root := pinnedPythonSDK(t)
 	registry := NewRegistry("bootstrap", "http://127.0.0.1:0", time.Second, 30*time.Second)
-	policy, err := destination.New("runner", nil)
+	policy, err := destination.New("runner", []string{"127.0.0.1"})
 	require.NoError(t, err)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	var server atomic.Pointer[Server]
-	server.Store(NewServer(registry, policy, policy, logger))
-	orch := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { server.Load().ServeHTTP(w, r) }))
+	server := NewServer(registry, policy, policy, logger)
+	orch := httptest.NewUnstartedServer(server)
 	defer orch.Close()
+	defer server.Close()
 	registry.service = "http://" + orch.Listener.Addr().String()
 	orch.Start()
 	fixture := filepath.Join(root, "cmd", "livepeer", "testdata", "python_runner_session_controls.py")
@@ -64,16 +63,10 @@ func TestPinnedPythonRequestSessionControls(t *testing.T) {
 	startup := bufio.NewScanner(stdout)
 	require.True(t, startup.Scan(), "Python runner startup failed: %s", stderr.String())
 	var registered struct {
-		RunnerID  string `json:"runner_id"`
-		RunnerURL string `json:"runner_url"`
+		RunnerID string `json:"runner_id"`
 	}
 	require.NoError(t, json.Unmarshal(startup.Bytes(), &registered), startup.Text())
 	require.NotEmpty(t, registered.RunnerID)
-	require.NotEmpty(t, registered.RunnerURL)
-	grant := strings.TrimPrefix(registered.RunnerURL, "http://")
-	policy, err = destination.New("runner", []string{grant})
-	require.NoError(t, err)
-	server.Store(NewServer(registry, policy, policy, logger))
 	client := &http.Client{Timeout: 5 * time.Second}
 	response, err := client.Post(orch.URL+"/apps/"+registered.RunnerID+"/session", "application/json", nil)
 	require.NoError(t, err)

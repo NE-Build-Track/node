@@ -56,7 +56,7 @@ func TestSignerDiscovery(t *testing.T) {
 		sources[source] = testURL(t, server.URL+"/"+source)
 	}
 	endpoint := sources["empty"]
-	for _, grants := range [][]string{nil, {net.JoinHostPort("localhost", endpoint.Port())}, {net.JoinHostPort(endpoint.Hostname(), "1")}} {
+	for _, grants := range [][]string{nil, {net.JoinHostPort("127.0.0.2", endpoint.Port())}, {net.JoinHostPort(endpoint.Hostname(), "1")}} {
 		require.NoError(t, s.SetDiscovery([]*url.URL{endpoint}, grants...))
 		require.Equal(t, 503, discoveryResponse(s, "").Code, grants)
 		require.Zero(t, connections.Load(), "denial must happen before connecting")
@@ -84,7 +84,7 @@ func TestSignerDiscovery(t *testing.T) {
 			for i, source := range test.sources {
 				urls[i] = sources[source]
 			}
-			require.NoError(t, s.SetDiscovery(urls, server.URL))
+			require.NoError(t, s.SetDiscovery(urls, endpoint.Hostname()))
 			w := discoveryResponse(s, test.query)
 			require.Equal(t, test.status, w.Code, w.Body.String())
 			if slices.Contains(test.sources, "good") {

@@ -83,8 +83,8 @@ Set `Orchestrators` to the base URLs to query. Local or private sources also
 need [destination grants](configuration.md#destination-grants). For example:
 
 ```toml
-Orchestrators = ["http://localhost:8935"]
-DiscoveryGrants = ["http://127.0.0.1:8935"]
+Orchestrators = ["http://127.0.0.1:8935"]
+DiscoveryGrants = ["127.0.0.1:8935"]
 ```
 
 The signer queries each configured orchestrator's `/discovery` endpoint when

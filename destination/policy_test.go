@@ -56,7 +56,7 @@ func TestRedirectChecksDestinationAndDropsAuthorization(t *testing.T) {
 		http.Redirect(w, r, target, http.StatusFound)
 	}))
 	defer redirect.Close()
-	policy, err := New("runner", []string{redirect.URL})
+	policy, err := New("runner", []string{strings.TrimPrefix(redirect.URL, "http://")})
 	require.NoError(t, err)
 	request, err := http.NewRequest(http.MethodGet, redirect.URL, nil)
 	require.NoError(t, err)
@@ -77,7 +77,7 @@ func TestRedirectChecksDestinationAndDropsAuthorization(t *testing.T) {
 		require.ErrorContains(t, err, "denied address")
 	}
 	require.Zero(t, connections.Load(), "redirect and proxy targets must remain unconnected")
-	policy, err = New("runner", []string{redirect.URL, final.URL})
+	policy, err = New("runner", []string{strings.TrimPrefix(redirect.URL, "http://"), strings.TrimPrefix(final.URL, "http://")})
 	require.NoError(t, err)
 	client = policy.Client()
 	defer client.CloseIdleConnections()
@@ -103,7 +103,7 @@ func TestHTTPSRejectsUntrustedCertificate(t *testing.T) {
 		t.Error("untrusted certificate must fail before sending a request")
 	}))
 	defer server.Close()
-	policy, err := New("runner", []string{server.URL})
+	policy, err := New("runner", []string{"127.0.0.1"})
 	require.NoError(t, err)
 	client := policy.Client()
 	defer client.CloseIdleConnections()
@@ -112,23 +112,41 @@ func TestHTTPSRejectsUntrustedCertificate(t *testing.T) {
 	require.ErrorAs(t, err, &certificateError)
 }
 
-func TestGrants(t *testing.T) {
-	for raw, address := range map[string]string{
-		"orch.internal": "orch.internal:443", "localhost": "localhost:443", "//orch.internal": "orch.internal:443",
-		"https://orch.internal": "orch.internal:443", "http://orch.internal": "orch.internal:80",
-		"127.0.0.1:8935": "127.0.0.1:8935", "http://orch.internal:443": "orch.internal:443",
-		"https://orch.internal:00443": "orch.internal:00443",
-		"[fe80::1%en0]:8935":          "[fe80::1%en0]:8935", "https://[fe80::1%25en0]:8935": "[fe80::1%en0]:8935",
-		"[::1]": "[::1]:443", "http://[::1]": "[::1]:80", "https://[::1]:8935": "[::1]:8935",
-	} {
-		p, err := New("discovery", []string{raw})
-		require.NoError(t, err, raw)
-		require.Contains(t, p.Grants, address)
-	}
-	for _, raw := range []string{"", "ftp://orch", ":443", "orch:", "orch:0", "orch:65536", "orch:abc", "::1", "[bad]", "one,two", "*.internal", "https://user:password@orch", "orch/", "orch/path", "orch?", "orch?x=y", "orch#fragment"} {
+func TestInvalidGrants(t *testing.T) {
+	for _, raw := range []string{"", "localhost", "localhost:443", "127.0.0.1:", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:abc", "[::1]", "[::1]:0", "[::1]:65536", "127.0.0.0/8", "::1/128", "127.0.0.*", "127.0.0.1,::1", "http://127.0.0.1:9000", "https://user:password@127.0.0.1", "127.0.0.1/path"} {
 		_, err := New("discovery", []string{raw})
 		require.Error(t, err, raw)
 		require.NotContains(t, err.Error(), "password")
+	}
+}
+
+func TestGrants(t *testing.T) {
+	p, err := New("runner", []string{
+		"127.0.0.1", "127.0.0.2:09000", "::ffff:127.0.0.3", "[::ffff:127.0.0.4]:9000",
+		"0:0:0:0:0:0:0:1", "[::2]:9000", "fe80::1%en0", "[fe80::2%en0]:9000",
+	})
+	require.NoError(t, err)
+	p.Lookup = func(_ context.Context, host string) ([]net.IPAddr, error) {
+		ip := map[string]string{"localhost": "127.0.0.1", "exact.local": "127.0.0.2"}[host]
+		return []net.IPAddr{{IP: net.ParseIP(ip)}}, nil
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel() // Check enforcement without opening outbound connections.
+	for address, allowed := range map[string]bool{
+		"127.0.0.1:9000": true, "127.0.0.1:9001": true, "[::ffff:127.0.0.1]:9000": true,
+		"127.0.0.2:9000": true, "127.0.0.2:9001": false, "[::ffff:127.0.0.2]:9000": true,
+		"127.0.0.3:9000": true, "127.0.0.4:9000": true, "127.0.0.4:9001": false,
+		"[::1]:9000": true, "[::1]:9001": true, "[::2]:9000": true, "[::2]:9001": false,
+		"[fe80::1%en0]:9000": true, "[fe80::1%en1]:9000": false, "[fe80::1]:9000": false,
+		"[fe80::2%en0]:9000": true, "[fe80::2%en1]:9000": false, "[fe80::2%en0]:9001": false,
+		"8.8.8.8:443": true, "127.0.0.5:9000": false, "localhost:9000": false, "exact.local:9000": false,
+	} {
+		_, err := p.DialContext(ctx, "tcp", address)
+		if allowed {
+			require.ErrorIs(t, err, context.Canceled, address)
+		} else {
+			require.ErrorContains(t, err, "denied address", address)
+		}
 	}
 }
 
@@ -145,11 +163,6 @@ func TestDNSAnswersRespectGrants(t *testing.T) {
 		_, err := p.DialContext(ctx, "tcp", "orch.example:443")
 		require.ErrorContains(t, err, "denied address")
 	}
-	granted, err := New("runner", []string{"orch.example:443"})
-	require.NoError(t, err)
-	granted.Lookup = p.Lookup
-	_, err = granted.DialContext(ctx, "tcp", "orch.example:443")
-	require.ErrorIs(t, err, context.Canceled, "the exact hostname grant permits these DNS answers")
 }
 
 func TestDialContextRechecksDNSOnEachConnection(t *testing.T) {

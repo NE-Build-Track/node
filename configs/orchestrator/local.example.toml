@@ -2,5 +2,5 @@
 Listen = "127.0.0.1:8935"
 MetricsListen = "127.0.0.1:8936"
 RunnerConfig = "runners.local.example.toml"
-RunnerGrants = ["127.0.0.1:9000"]
+RunnerGrants = ["127.0.0.1"]
 HealthGrants = ["127.0.0.1:9000"]

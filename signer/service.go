@@ -81,8 +81,7 @@ func validateDiscoveryURL(endpoint *url.URL) error {
 }
 
 // SetDiscovery configures discovery sources. Private destinations, including
-// redirect targets, require an exact host:port grant for discovery. Grant URLs
-// default to HTTPS; the scheme supplies an omitted port, not a scheme restriction.
+// redirect targets, require an IP or IP:port grant for discovery.
 func (s *Service) SetDiscovery(orchestrators []*url.URL, grants ...string) error {
 	policy, err := destination.New("signer-discovery", grants)
 	if err != nil {

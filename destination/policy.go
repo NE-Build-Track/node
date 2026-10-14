@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
-	"strconv"
-	"strings"
 	"time"
 )
 
@@ -55,49 +53,40 @@ func Public(ip netip.Addr) bool {
 	return true
 }
 
-// Policy grants a purpose-specific list of exact host:port destinations.
-// Keep separate instances for runners, webhooks, discovery and Ethereum RPC.
+// Policy grants purpose-specific literal IP destinations, with optional ports.
+// Keep separate instances for runners, webhooks and discovery.
 type Policy struct {
 	Purpose string
-	Grants  map[string]struct{}
+	Grants  map[netip.AddrPort]struct{} // Port zero permits any port.
 	Lookup  func(context.Context, string) ([]net.IPAddr, error)
 }
 
-// New accepts host[:port] or HTTP(S) grant URLs. An omitted scheme defaults
-// to HTTPS; schemes select default ports, while grants still match host:port.
+// New accepts literal IP addresses or IP:port grants. A bare IP permits any port.
 func New(purpose string, grants []string) (Policy, error) {
-	p := Policy{Purpose: purpose, Grants: map[string]struct{}{}}
+	p := Policy{Purpose: purpose, Grants: map[netip.AddrPort]struct{}{}}
 	for _, raw := range grants {
-		if !strings.Contains(raw, "://") {
-			// Bare host:port grants carry literal IPv6 zone identifiers.
-			raw = "https://" + strings.ReplaceAll(strings.TrimPrefix(raw, "//"), "%", "%25")
+		if ip, err := netip.ParseAddr(raw); err == nil {
+			p.Grants[netip.AddrPortFrom(ip.Unmap(), 0)] = struct{}{}
+			continue
 		}
-		u, err := url.Parse(raw)
-		if err != nil || ValidateURL(u) != nil || u.User != nil || u.Path != "" ||
-			u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || strings.ContainsAny(u.Host, ",*") {
-			return Policy{}, fmt.Errorf("invalid %s destination grant: expected host[:port] or HTTP(S) URL without credentials, path, query or fragment", purpose)
+		endpoint, err := netip.ParseAddrPort(raw)
+		if err != nil || endpoint.Port() == 0 {
+			return Policy{}, fmt.Errorf("invalid %s destination grant: expected an IP address or IP:port with port between 1 and 65535", purpose)
 		}
-		address := u.Host
-		if u.Port() == "" && !strings.HasSuffix(u.Host, ":") {
-			port := "443"
-			if u.Scheme == "http" {
-				port = "80"
-			}
-			address += ":" + port
-		}
-		host, port, err := net.SplitHostPort(address)
-		portNumber, portErr := strconv.Atoi(port)
-		if err != nil || host == "" || portErr != nil || portNumber < 1 || portNumber > 65535 {
-			return Policy{}, fmt.Errorf("invalid %s destination grant: expected a port between 1 and 65535", purpose)
-		}
-		p.Grants[strings.ToLower(net.JoinHostPort(host, port))] = struct{}{}
+		p.Grants[netip.AddrPortFrom(endpoint.Addr().Unmap(), endpoint.Port())] = struct{}{}
 	}
 	return p, nil
 }
 
 func (p Policy) granted(addr string) bool {
-	_, ok := p.Grants[strings.ToLower(addr)]
-	return ok
+	endpoint, err := netip.ParseAddrPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := endpoint.Addr().Unmap()
+	_, exact := p.Grants[netip.AddrPortFrom(ip, endpoint.Port())]
+	_, anyPort := p.Grants[netip.AddrPortFrom(ip, 0)]
+	return exact || anyPort
 }
 
 // ParseURL parses a string at an input boundary and validates the destination.
@@ -151,7 +140,7 @@ func (p Policy) DialContext(ctx context.Context, network, address string) (net.C
 	if !p.granted(net.JoinHostPort(host, port)) {
 		for _, ip := range ips {
 			if !Public(ip) {
-				return nil, fmt.Errorf("%s destination contains a denied address; add an exact host:port grant for this purpose", p.Purpose)
+				return nil, fmt.Errorf("%s destination contains a denied address; configure grants for this purpose", p.Purpose)
 			}
 		}
 	}
