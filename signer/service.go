@@ -1,7 +1,6 @@
 package signer
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -356,8 +355,9 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		signerError(w, 400, "invalid orchestrator Protobuf")
 		return
 	}
-	address := ethcommon.BytesToAddress(info.Address)
-	if !bytes.Equal(info.Address, info.TicketParams.Recipient) || address == (ethcommon.Address{}) || len(info.Auth.Token) == 0 || info.TicketParams.Expiration.CreationRound <= 0 || len(info.TicketParams.Expiration.CreationRoundBlockHash) != 32 || ethcommon.BytesToHash(info.TicketParams.Expiration.CreationRoundBlockHash) == (ethcommon.Hash{}) || len(info.Address) != 20 || info.Price.PricePerUnit <= 0 || info.Price.UnitsPerPrice <= 0 || len(info.TicketParams.RecipientRandHash) != 32 || info.Auth.SessionID == "" {
+	// NB: Once go-livepeer is phased out, ensure OrchestratorInfo.Address matches info.TicketParams.Recipient
+	address := ethcommon.BytesToAddress(info.TicketParams.Recipient)
+	if address == (ethcommon.Address{}) || len(info.Auth.Token) == 0 || info.TicketParams.Expiration.CreationRound <= 0 || len(info.TicketParams.Expiration.CreationRoundBlockHash) != 32 || ethcommon.BytesToHash(info.TicketParams.Expiration.CreationRoundBlockHash) == (ethcommon.Hash{}) || len(info.TicketParams.Recipient) != 20 || info.Price.PricePerUnit <= 0 || info.Price.UnitsPerPrice <= 0 || len(info.TicketParams.RecipientRandHash) != 32 || info.Auth.SessionID == "" {
 		signerError(w, 400, "incomplete or expired orchestrator payment params")
 		return
 	}

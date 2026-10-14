@@ -63,7 +63,7 @@ response's `address` is an orchestrator service URL, not an Ethereum address.
 
 Success returns `payment`, `segCreds`, and `state`. Send the first two as the
 orchestrator's `Livepeer-Payment` and `Livepeer-Segment` headers. State is bound
-to the orchestrator address, application, payment type, and manifest ID.
+to the ticket recipient, application, payment type, and manifest ID.
 Earlier state can be replayed; HTTP retries can generate separate tickets.
 
 Requests are limited to 1 MiB, with a five-second body deadline, a 30-second
@@ -110,8 +110,8 @@ Fixed rates never refresh or expire.
 | Batch size | At most 100 tickets; issued credit covers at least the greater of the fee and one ticket's EV. Unused credit remains in signed state. |
 
 Payment generation requires payer deposit and recipient-claimable reserve,
-complete creation-round metadata, and a ticket recipient matching the
-orchestrator address. The supplied creation round and hash are retained.
+complete creation-round metadata, and a nonzero, 20-byte ticket recipient.
+The supplied creation round and hash are retained.
 Parameters within one L1 block of expiry, authentication within three minutes
 of expiry, or a carried ticket nonce at least 500 require refresh (480).
 A new recipient randomness hash resets the nonce; individual

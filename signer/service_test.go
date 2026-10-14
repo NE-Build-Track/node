@@ -352,8 +352,9 @@ func TestPaymentParamsValidation(t *testing.T) {
 		{"wrong hash", func(i *wire.OrchestratorInfo) {
 			i.TicketParams.Expiration.CreationRoundBlockHash = ethcommon.HexToHash("0xabcd").Bytes()
 		}, 200},
-		{"recipient mismatch", func(i *wire.OrchestratorInfo) { i.TicketParams.Recipient = ethcommon.HexToAddress("0xabcd").Bytes() }, 400},
-		{"zero recipient", func(i *wire.OrchestratorInfo) { i.Address = make([]byte, 20); i.TicketParams.Recipient = i.Address }, 400},
+		{"distinct recipient", func(i *wire.OrchestratorInfo) { i.TicketParams.Recipient = ethcommon.HexToAddress("0xabcd").Bytes() }, 200},
+		{"zero recipient", func(i *wire.OrchestratorInfo) { i.TicketParams.Recipient = make([]byte, 20) }, 400},
+		{"short recipient", func(i *wire.OrchestratorInfo) { i.TicketParams.Recipient = []byte{1} }, 400},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			info := original
@@ -367,6 +368,7 @@ func TestPaymentParamsValidation(t *testing.T) {
 				require.NoError(t, err)
 				payment, err := wire.DecodePayment(data)
 				require.NoError(t, err)
+				require.Equal(t, info.TicketParams.Recipient, payment.TicketParams.Recipient)
 				require.Equal(t, info.TicketParams.Expiration, payment.Expiration, "preserve the supplied creation round and hash")
 			} else {
 				requirePaymentFailure(t, w, tc.status)

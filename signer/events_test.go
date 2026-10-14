@@ -31,6 +31,7 @@ func TestSigningEventContract(t *testing.T) {
 	for _, kind := range []string{"live", "fixed"} {
 		t.Run(kind, func(t *testing.T) {
 			s, info := testService(t)
+			info.Address = nil
 			key := &failingPaymentSigner{TicketSigner: s.key}
 			s.key = key
 			proposals := make(chan paymentState, 3)
@@ -57,6 +58,7 @@ func TestSigningEventContract(t *testing.T) {
 			var previous paymentState
 			for i := range 3 {
 				if i == 2 {
+					info.Address = info.TicketParams.Recipient
 					info.TicketParams.RecipientRandHash = crypto.Keccak256([]byte("refreshed"))
 					request["orchestrator"] = wire.EncodeOrchestratorInfo(info)
 				}
@@ -77,6 +79,7 @@ func TestSigningEventContract(t *testing.T) {
 				require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
 				var state paymentState
 				require.NoError(t, json.Unmarshal(result.State.State, &state))
+				require.Equal(t, info.TicketParams.Recipient, state.OrchestratorAddress.Bytes())
 				encodedPayment, err := base64.StdEncoding.DecodeString(result.Payment)
 				require.NoError(t, err)
 				payment, err := wire.DecodePayment(encodedPayment)
@@ -132,6 +135,10 @@ func TestSigningEventContract(t *testing.T) {
 				previous = state
 				request["state"] = result.State
 			}
+			info.TicketParams.Recipient = s.key.Address().Bytes()
+			request["orchestrator"] = wire.EncodeOrchestratorInfo(info)
+			requirePaymentFailure(t, postPayment(t, s, request), 400)
+			require.Len(t, events, 3)
 			require.Equal(t, 1, authCalls, "cached authorization still emits every accounting event")
 			raw, err := json.Marshal(events[0])
 			require.NoError(t, err)
