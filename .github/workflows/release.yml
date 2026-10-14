@@ -45,9 +45,6 @@ jobs:
     env:
       ARCH: ${{ matrix.arch }}
       BUILD_RELEASE: ${{ github.event_name != 'push' || github.ref_type == 'tag' }}
-      BUILD_DOCKER: >-
-        ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
-            github.event_name == 'pull_request' }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -140,7 +137,6 @@ jobs:
             alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 \
             sh /smoke.sh "/artifacts/$BUNDLE.tar.gz" "$RELEASE_VERSION" "$RELEASE_COMMIT"
       - name: Package image from verified binaries
-        if: env.BUILD_DOCKER == 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -158,7 +154,6 @@ jobs:
             org.opencontainers.image.version=${{ steps.metadata.outputs.version }}
           cache-to: type=gha,scope=docker-${{ matrix.arch }},mode=max
       - name: Smoke test image
-        if: env.BUILD_DOCKER == 'true'
         env:
           IMAGE_VERSION: ${{ steps.metadata.outputs.version }}
           IMAGE_COMMIT: ${{ steps.metadata.outputs.commit }}
@@ -173,12 +168,12 @@ jobs:
           if-no-files-found: error
           compression-level: 0
       - name: Export tested image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push'
         env:
           IMAGE: livepeer:test-${{ matrix.arch }}
         run: docker save --output "$RUNNER_TEMP/docker-$ARCH.tar" "$IMAGE"
       - name: Save tested image
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.event_name == 'push'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: docker-linux-${{ matrix.arch }}

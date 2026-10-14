@@ -1,11 +1,10 @@
 name: Publish Docker
 
-# Release builds images and runs Go checks on main pushes.
-# Consume only its successful main-push artifacts; registry writes stay here.
+# Publish images triggered by release builds on main or version tags
 on:
   workflow_run:
     workflows: [Release]
-    branches: [main]
+    branches: [main, 'v*']
     types: [completed]
 
 permissions:
@@ -19,7 +18,7 @@ jobs:
   publish:
     if: >-
       github.event.workflow_run.event == 'push' &&
-      github.event.workflow_run.head_branch == 'main' &&
+      (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-26.04
@@ -51,34 +50,49 @@ jobs:
           registry: docker.io
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Publish tested images and commit manifest
+      - name: Publish tested images and manifests
         id: publish
         env:
+          GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
           COMMIT: ${{ github.event.workflow_run.head_sha }}
+          REF_NAME: ${{ github.event.workflow_run.head_branch }}
         run: |
           repository=$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
           ghcr_image="ghcr.io/$repository"
           dockerhub_image="docker.io/$repository"
+          tag="sha-$COMMIT"
+          if [[ "$REF_NAME" != main ]]; then
+            [[ "$REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+              echo "Invalid release tag: $REF_NAME" >&2
+              exit 1
+            }
+            test "$(gh api "repos/$REPOSITORY/commits/refs/tags/$REF_NAME" --jq .sha)" = "$COMMIT"
+            # Release binaries embed a different version than main at the same commit.
+            tag="$REF_NAME-$tag"
+          fi
           for arch in amd64 arm64; do
             docker load --input "images/docker-$arch.tar"
             test "$(docker image inspect --platform "linux/$arch" --format '{{.Os}}/{{.Architecture}}' "livepeer:test-$arch")" = "linux/$arch"
             test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "livepeer:test-$arch")" = "$COMMIT"
+            if [[ "$REF_NAME" != main ]]; then
+              test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "livepeer:test-$arch")" = "$REF_NAME"
+            fi
             for image in "$ghcr_image" "$dockerhub_image"; do
-              docker tag "livepeer:test-$arch" "$image:sha-$COMMIT-$arch"
-              docker push "$image:sha-$COMMIT-$arch"
+              docker tag "livepeer:test-$arch" "$image:$tag-$arch"
+              docker push "$image:$tag-$arch"
             done
           done
           publish_manifest() {
             local registry=$1 image=$2 digest
-            docker buildx imagetools create --tag "$image:sha-$COMMIT" \
+            docker buildx imagetools create --tag "$image:$tag" \
               --metadata-file "$RUNNER_TEMP/$registry-manifest.json" \
-              "$image:sha-$COMMIT-amd64" "$image:sha-$COMMIT-arm64"
+              "$image:$tag-amd64" "$image:$tag-arm64"
             digest=$(jq -er '."containerimage.descriptor".digest' "$RUNNER_TEMP/$registry-manifest.json")
             docker buildx imagetools inspect --raw "$image@$digest" | \
               jq -e '[.manifests[] | select(.annotations["vnd.docker.reference.type"] != "attestation-manifest") | .platform.os + "/" + .platform.architecture] | sort == ["linux/amd64", "linux/arm64"]'
             echo "${registry}_digest=$digest" >> "$GITHUB_OUTPUT"
-            echo "Published \`$image:sha-$COMMIT\` (\`$digest\`)." >> "$GITHUB_STEP_SUMMARY"
+            echo "Published \`$image:$tag\` (\`$digest\`)." >> "$GITHUB_STEP_SUMMARY"
           }
           publish_manifest ghcr "$ghcr_image"
           publish_manifest dockerhub "$dockerhub_image"
@@ -136,7 +150,7 @@ jobs:
       packages: write
     # Keep pending promotions: an older build may finish after the newest one.
     concurrency:
-      group: docker-main-promotion
+      group: docker-${{ github.event.workflow_run.head_branch }}-promotion
       cancel-in-progress: false
       queue: max
     steps:
@@ -151,22 +165,25 @@ jobs:
           registry: docker.io
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Promote current main commit
+      - name: Promote verified images
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           COMMIT: ${{ github.event.workflow_run.head_sha }}
+          REF_NAME: ${{ github.event.workflow_run.head_branch }}
           GHCR_DIGEST: ${{ needs.publish.outputs.ghcr_digest }}
           DOCKERHUB_DIGEST: ${{ needs.publish.outputs.dockerhub_digest }}
         run: |
-          head=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
-          if [[ "$head" != "$COMMIT" ]]; then
-            echo "Skipping main tag: $COMMIT is no longer the head of main." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+          if [[ "$REF_NAME" == main ]]; then
+            head=$(gh api "repos/$GH_REPO/git/ref/heads/main" --jq .object.sha)
+            if [[ "$head" != "$COMMIT" ]]; then
+              echo "Skipping main tag: $COMMIT is no longer the head of main." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
           repository=$(printf '%s' "$GH_REPO" | tr '[:upper:]' '[:lower:]')
           for reference in "ghcr.io/$repository@$GHCR_DIGEST" "docker.io/$repository@$DOCKERHUB_DIGEST"; do
             image=${reference%@*}
-            docker buildx imagetools create --tag "$image:main" "$reference"
-            echo "Promoted \`$image:main\` to \`$COMMIT\` (\`$reference\`)." >> "$GITHUB_STEP_SUMMARY"
+            docker buildx imagetools create --tag "$image:$REF_NAME" "$reference"
+            echo "Promoted \`$image:$REF_NAME\` to \`$COMMIT\` (\`$reference\`)." >> "$GITHUB_STEP_SUMMARY"
           done
