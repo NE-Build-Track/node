@@ -100,7 +100,7 @@ func TestRegressionOffchainSingleShotCapacityAndHeaders(t *testing.T) {
 	case <-seen:
 		t.Error("second request reached capacity=1 upstream while first was still running")
 	case code := <-done:
-		require.Contains(t, []int{409, 503}, code)
+		require.Equal(t, http.StatusServiceUnavailable, code)
 	case <-time.After(time.Second):
 		t.Fatal("second request neither rejected nor routed")
 	}

@@ -78,7 +78,7 @@ func TestDynamicRunnerSessionProxyAndCapacity(t *testing.T) {
 	require.NoError(t, response.Body.Close())
 	response, err = http.Post(srv.URL+"/apps/"+heartbeat.RunnerID+"/session", "application/json", nil)
 	require.NoError(t, err)
-	require.Equal(t, http.StatusConflict, response.StatusCode)
+	require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
 	require.NoError(t, response.Body.Close())
 	response, err = http.Get(srv.URL + "/apps/" + heartbeat.RunnerID + "/session/" + reserved.SessionID + "/app/hello?q=value")
 	require.NoError(t, err)
@@ -91,6 +91,37 @@ func TestDynamicRunnerSessionProxyAndCapacity(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, response.StatusCode)
 	require.NoError(t, response.Body.Close())
+}
+
+func TestSessionCallbackCredentials(t *testing.T) {
+	registry, server := reviewServer(t, "http://127.0.0.1:1")
+	defer server.Close()
+	require.NoError(t, registry.AddStatic(StaticRunner{ID: "r", RunnerURL: "http://127.0.0.1:1", App: "app", Capacity: 2}))
+	sid, _, _, _, err := registry.Reserve("r")
+	require.NoError(t, err)
+	other, _, _, _, err := registry.Reserve("r")
+	require.NoError(t, err)
+	target, token, _, err := registry.sessionTarget("r", sid)
+	require.NoError(t, err)
+	_, otherToken, _, err := registry.sessionTarget("r", other)
+	require.NoError(t, err)
+	for _, path := range []string{"proxy", "stop"} {
+		req := httptest.NewRequest(http.MethodPost, "/runner/r/session/"+sid+"/"+path, strings.NewReader(`{}`))
+		req.Header.Set("Livepeer-Session-Token", otherToken)
+		w := httptest.NewRecorder()
+		server.ServeHTTP(w, req)
+		require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	}
+	for range 25 {
+		_, err := registry.addProxy("r", sid, token, target)
+		require.NoError(t, err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/runner/r/session/"+sid+"/proxy", strings.NewReader(`{}`))
+	req.Header.Set("Livepeer-Session-Token", token)
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.Contains(t, w.Body.String(), "too many session proxies")
 }
 
 func TestRunnerRegistryHasBoundedCapacity(t *testing.T) {
@@ -216,7 +247,7 @@ func TestGeneratedProxyHasSeparateDestinationGrant(t *testing.T) {
 	create.Header.Set("Livepeer-Session-Token", "bad")
 	record := httptest.NewRecorder()
 	srv.ServeHTTP(record, create)
-	require.Equal(t, http.StatusForbidden, record.Code)
+	require.Equal(t, http.StatusUnauthorized, record.Code)
 	create = httptest.NewRequest(http.MethodPost, path, bytes.NewBufferString(`{"target_url":"`+upstream.URL+`"}`))
 	create.Header.Set("Livepeer-Session-Token", token)
 	record = httptest.NewRecorder()

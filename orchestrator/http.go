@@ -271,7 +271,7 @@ func (s *Server) callbackAuthorized(r *http.Request) bool {
 
 func (s *Server) createProxy(w http.ResponseWriter, r *http.Request) {
 	if !s.callbackAuthorized(r) {
-		fail(w, http.StatusForbidden, "invalid session token")
+		fail(w, http.StatusUnauthorized, "invalid session token")
 		return
 	}
 	var body struct {
@@ -294,7 +294,11 @@ func (s *Server) createProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.registry.addProxy(r.PathValue("runner_id"), r.PathValue("session_id"), r.Header.Get("Livepeer-Session-Token"), target)
 	if err != nil {
-		fail(w, http.StatusForbidden, "invalid session token")
+		status := http.StatusForbidden
+		if errors.Is(err, errInvalidSessionToken) {
+			status = http.StatusUnauthorized
+		}
+		fail(w, status, err.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"proxy_id": id, "url": s.registry.proxyURL(id)})
@@ -399,7 +403,7 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, transport http.Ro
 
 func (s *Server) createChannels(w http.ResponseWriter, r *http.Request) {
 	if !s.callbackAuthorized(r) {
-		fail(w, http.StatusForbidden, "invalid session token")
+		fail(w, http.StatusUnauthorized, "invalid session token")
 		return
 	}
 	var body struct {
@@ -476,7 +480,7 @@ func (s *Server) createChannels(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) deleteChannels(w http.ResponseWriter, r *http.Request) {
 	if !s.callbackAuthorized(r) {
-		fail(w, http.StatusForbidden, "invalid session token")
+		fail(w, http.StatusUnauthorized, "invalid session token")
 		return
 	}
 	var body struct {

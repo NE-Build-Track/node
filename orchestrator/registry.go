@@ -111,6 +111,8 @@ type session struct {
 	cancel    context.CancelFunc
 }
 
+var errInvalidSessionToken = errors.New("invalid session token")
+
 type sessionProxy struct {
 	target *url.URL
 	runner bool
@@ -447,7 +449,7 @@ func (r *Registry) reserveWithPrice(id, requestedID string, agreed *priceInfo) (
 		return "", "", "", http.StatusServiceUnavailable, errors.New("session capacity reached")
 	}
 	if len(item.Sessions) >= item.Capacity {
-		return "", "", "", http.StatusConflict, errors.New("runner at capacity")
+		return "", "", "", http.StatusServiceUnavailable, errors.New("runner at capacity")
 	}
 	sessionID := requestedID
 	if sessionID == "" {
@@ -554,7 +556,7 @@ func (r *Registry) release(id, sid, token string, callback bool) (int, error) {
 		return http.StatusNotFound, errors.New("session not found")
 	}
 	if callback && !equalSecret(item.Sessions[sid].Token, token) {
-		return http.StatusForbidden, errors.New("invalid session token")
+		return http.StatusUnauthorized, errInvalidSessionToken
 	}
 	r.releaseLocked(id, sid)
 	return http.StatusOK, nil
@@ -624,7 +626,7 @@ func (r *Registry) addProxy(id, sid, token string, target *url.URL) (string, err
 	defer r.mu.Unlock()
 	item := r.runners[id]
 	if item == nil || item.Sessions[sid] == nil || !equalSecret(item.Sessions[sid].Token, token) {
-		return "", errors.New("invalid session token")
+		return "", errInvalidSessionToken
 	}
 	proxyID, err := randomID(10)
 	if err != nil {
