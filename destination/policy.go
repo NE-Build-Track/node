@@ -55,7 +55,7 @@ func Public(ip netip.Addr) bool {
 	return true
 }
 
-// Policy grants purpose-specific literal IP destinations and CIDR subnets.
+// Policy grants purpose-specific IP destinations and CIDR subnets.
 // Keep separate instances for runners, webhooks and discovery.
 type Policy struct {
 	Purpose string
@@ -147,11 +147,9 @@ func (p Policy) DialContext(ctx context.Context, network, address string) (net.C
 	if len(ips) == 0 {
 		return nil, fmt.Errorf("%s destination has no addresses", p.Purpose)
 	}
-	if !p.granted(net.JoinHostPort(host, port)) {
-		for _, ip := range ips {
-			if !Public(ip) {
-				return nil, fmt.Errorf("%s destination contains a denied address; configure grants for this purpose", p.Purpose)
-			}
+	for _, ip := range ips {
+		if !Public(ip) && !p.granted(net.JoinHostPort(ip.String(), port)) {
+			return nil, fmt.Errorf("%s destination contains a denied address; configure grants for this purpose", p.Purpose)
 		}
 	}
 	dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}

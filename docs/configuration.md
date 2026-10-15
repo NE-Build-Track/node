@@ -71,7 +71,7 @@ need none. Permissions apply per purpose, including redirects.
 
 All `*-grants` accept a literal IP, `IP:port` (`[IPv6]:port` for IPv6), or a CIDR
 such as `192.168.1.0/24` or `fc00::/7`. A bare IP or CIDR permits any port.
-Grants apply only to literal IP destinations, not hostnames resolving to them.
+Grants are checked against each resolved IP at connection time.
 
 ## Credential files
 

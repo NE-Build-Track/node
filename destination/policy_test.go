@@ -130,7 +130,10 @@ func TestGrants(t *testing.T) {
 	})
 	require.NoError(t, err)
 	p.Lookup = func(_ context.Context, host string) ([]net.IPAddr, error) {
-		ip := map[string]string{"localhost": "127.0.0.1", "exact.local": "127.0.0.2"}[host]
+		ip := map[string]string{
+			"localhost": "127.0.0.1", "exact.local": "127.0.0.2",
+			"subnet.local": "192.168.0.1", "ipv6.local": "fd00::1",
+		}[host]
 		return []net.IPAddr{{IP: net.ParseIP(ip)}}, nil
 	}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -142,7 +145,8 @@ func TestGrants(t *testing.T) {
 		"[::1]:9000": true, "[::1]:9001": true, "[::2]:9000": true, "[::2]:9001": false,
 		"[fe80::1%en0]:9000": true, "[fe80::1%en1]:9000": false, "[fe80::1]:9000": false,
 		"[fe80::2%en0]:9000": true, "[fe80::2%en1]:9000": false, "[fe80::2%en0]:9001": false,
-		"8.8.8.8:443": true, "127.0.0.5:9000": false, "localhost:9000": false, "exact.local:9000": false,
+		"8.8.8.8:443": true, "127.0.0.5:9000": false, "localhost:9000": true, "localhost:9001": true,
+		"exact.local:9000": true, "exact.local:9001": false, "subnet.local:9000": true, "ipv6.local:9000": true,
 		"192.168.0.1:9000": true, "192.168.0.1:9001": true, "192.168.1.1:9000": false,
 		"[::ffff:192.168.0.255]:9000": true, "[fd00::1]:9000": true, "[fe00::1]:9000": false, "[fd00::1%en0]:9000": false,
 	} {
@@ -156,13 +160,15 @@ func TestGrants(t *testing.T) {
 }
 
 func TestDNSAnswersRespectGrants(t *testing.T) {
-	p, err := New("runner", []string{"0.0.0.0/0", "::/0"})
+	p, err := New("runner", []string{"127.0.0.1", "fc00::/7"})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	for _, ips := range [][]net.IPAddr{
-		{{IP: net.ParseIP("127.0.0.1")}}, {{IP: net.ParseIP("fc00::1")}},
+		{{IP: net.ParseIP("127.0.0.2")}}, {{IP: net.ParseIP("fe80::1")}},
 		{{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP("10.1.1.1")}},
+		{{IP: net.ParseIP("127.0.0.1")}, {IP: net.ParseIP("10.1.1.1")}},
+		{{IP: net.ParseIP("fc00::1")}, {IP: net.ParseIP("fe80::1")}},
 	} {
 		p.Lookup = func(context.Context, string) ([]net.IPAddr, error) { return ips, nil }
 		_, err := p.DialContext(ctx, "tcp", "orch.example:443")
@@ -171,18 +177,18 @@ func TestDNSAnswersRespectGrants(t *testing.T) {
 }
 
 func TestDialContextRechecksDNSOnEachConnection(t *testing.T) {
-	p, err := New("signer-discovery", nil)
+	p, err := New("signer-discovery", []string{"172.16.0.0/12"})
 	require.NoError(t, err)
 	lookups := 0
 	p.Lookup = func(context.Context, string) ([]net.IPAddr, error) {
 		lookups++
 		if lookups == 1 {
-			return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}}, nil
+			return []net.IPAddr{{IP: net.ParseIP("8.8.8.8")}, {IP: net.ParseIP("172.21.0.3")}}, nil
 		}
 		return []net.IPAddr{{IP: net.ParseIP("127.0.0.1")}}, nil
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	cancel() // Permit the public address through policy without connecting to it.
+	cancel() // Permit allowed addresses through policy without connecting to them.
 	_, err = p.DialContext(ctx, "tcp", "orch.example:443")
 	require.ErrorIs(t, err, context.Canceled)
 	_, err = p.DialContext(ctx, "tcp", "orch.example:443")
