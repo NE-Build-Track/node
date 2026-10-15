@@ -55,6 +55,11 @@ func TestRunnerProxyRoutingMatrix(t *testing.T) {
 							var err error
 							sid, app, _, _, err = registry.Reserve("runner")
 							require.NoError(t, err)
+							runners := registry.Discovery()[0].Runners
+							require.Len(t, runners, 1)
+							require.Equal(t, 1, runners[0].Capacity)
+							require.Equal(t, 1, runners[0].CapacityUsed)
+							require.Zero(t, runners[0].CapacityAvailable)
 						}
 						if proxy {
 							if template == "" {

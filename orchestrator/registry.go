@@ -398,10 +398,7 @@ func (r *Registry) Discovery() []discoveryEntry {
 		if !r.usable(item) || !r.priceAvailable(item) {
 			continue
 		}
-		available := item.Capacity - len(item.Sessions)
-		if available <= 0 {
-			continue
-		}
+		available := max(0, item.Capacity-len(item.Sessions))
 		result = append(result, discoveryRunner{URL: r.discoveryURL(id, item), App: item.App, Version: item.Version, Metadata: item.Metadata, GPU: item.GPU, Mode: item.Mode, Capacity: item.Capacity, CapacityUsed: len(item.Sessions), CapacityAvailable: available, PriceInfo: item.PriceInfo})
 	}
 	return []discoveryEntry{{Address: r.service, Runners: result}}
