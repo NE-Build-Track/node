@@ -18,10 +18,72 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestRunnerStopDrainsProxy(t *testing.T) {
+	for _, scenario := range []struct {
+		name   string
+		delay  time.Duration
+		status int
+	}{
+		{"response", 500 * time.Millisecond, http.StatusNoContent},
+		{"deadline", time.Second, http.StatusBadGateway},
+		{"client stop", 0, http.StatusBadGateway},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				registry, server := reviewServer(t, "http://127.0.0.1:1")
+				defer server.Close()
+				require.NoError(t, registry.AddStatic(StaticRunner{ID: "r", RunnerURL: "http://127.0.0.1:1", App: "app"}))
+				sid, appURL, _, _, err := registry.Reserve("r")
+				require.NoError(t, err)
+				target, token, _, err := registry.sessionTarget("r", sid)
+				require.NoError(t, err)
+				started, finish := make(chan struct{}), make(chan struct{})
+				done := make(chan time.Time, 1)
+				transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					close(started)
+					select {
+					case <-finish:
+						return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody}, nil
+					case <-r.Context().Done():
+						return nil, r.Context().Err()
+					}
+				})
+				w := httptest.NewRecorder()
+				go func() {
+					server.proxy(w, httptest.NewRequest(http.MethodPost, appURL, nil), transport, target, "", "r", sid, token, "")
+					done <- time.Now()
+				}()
+				<-started
+				prefix := "/runner/"
+				if scenario.name == "client stop" {
+					prefix = "/apps/"
+				}
+				stop := httptest.NewRequest(http.MethodPost, prefix+"r/session/"+sid+"/stop", nil)
+				stop.Header.Set("Livepeer-Session-Token", token)
+				stopped := httptest.NewRecorder()
+				released := time.Now()
+				server.ServeHTTP(stopped, stop)
+				require.Equal(t, http.StatusOK, stopped.Code)
+				_, sessions := registry.Counts()
+				require.Zero(t, sessions, "capacity must be released before draining finishes")
+				if scenario.name == "response" {
+					time.AfterFunc(scenario.delay, func() { close(finish) })
+				}
+				require.Equal(t, scenario.delay, (<-done).Sub(released))
+				require.Equal(t, scenario.status, w.Code)
+			})
+		})
+	}
+}
+
 func TestReleaseCancelsActiveProxy(t *testing.T) {
 	for _, mode := range []string{"persistent", "single-shot"} {
 		for _, protocol := range []string{"http", "sse", "websocket"} {
-			for _, issuer := range []string{"client", "runner", "shutdown"} {
+			for _, issuer := range []string{"client", "shutdown"} {
 				t.Run(mode+"/"+protocol+"/"+issuer, func(t *testing.T) {
 					started := make(chan http.Header, 1)
 					ended := make(chan struct{})
@@ -89,14 +151,7 @@ func TestReleaseCancelsActiveProxy(t *testing.T) {
 					if issuer == "shutdown" {
 						app.Close()
 					} else {
-						stopPath := "/apps/runner/session/" + sid + "/stop"
-						if issuer == "runner" {
-							stopPath = "/runner/runner/session/" + sid + "/stop"
-						}
-						request, err := http.NewRequest(http.MethodPost, server.URL+stopPath, nil)
-						require.NoError(t, err)
-						request.Header.Set("Livepeer-Session-Token", headers.Get("Livepeer-Session-Token"))
-						response, err := http.DefaultClient.Do(request)
+						response, err := http.Post(server.URL+"/apps/runner/session/"+sid+"/stop", "", nil)
 						require.NoError(t, err)
 						require.Equal(t, http.StatusOK, response.StatusCode)
 						require.NoError(t, response.Body.Close())

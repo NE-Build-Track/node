@@ -360,17 +360,26 @@ func (s *Server) proxyGenerated(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, transport http.RoundTripper, target *url.URL, appPath, runnerID, sid, token, control string) {
 	sessionCtx, ok := s.registry.sessionContext(runnerID, sid)
-	if !ok {
+	if !ok || sessionCtx.Err() != nil {
 		fail(w, http.StatusNotFound, "session not found")
 		return
 	}
 	ctx, cancel := context.WithCancel(r.Context())
-	stop := context.AfterFunc(sessionCtx, cancel)
+	stop := context.AfterFunc(sessionCtx, func() {
+		if stopped, ok := context.Cause(sessionCtx).(runnerStopped); ok {
+			// The runner may be awaiting its stop callback before sending its
+			// final response. Revoke the session now, but let that response finish.
+			timer := time.NewTimer(time.Until(stopped.deadline))
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+			case <-ctx.Done():
+			}
+		}
+		cancel()
+	})
 	defer stop()
 	defer cancel()
-	if sessionCtx.Err() != nil {
-		cancel()
-	}
 	proxy := &httputil.ReverseProxy{
 		Transport:     transport,
 		FlushInterval: -1,

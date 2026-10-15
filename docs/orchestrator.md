@@ -80,12 +80,12 @@ its HTTPS address. The separate metrics listener must remain on loopback; see
 
 ## Sessions and proxies
 
-Each session keeps the price agreed when it was reserved. Later runner
-heartbeats or exchange-rate updates affect new sessions. Stopping a session,
-expiry, failed health, unregistering a runner, exhausted credit, or shutdown
-cancels active HTTP, SSE, and WebSocket requests and removes session channels
-and proxies. Single-shot requests use the same lifecycle. A runner stopping
-its own active request should expect that request to end abruptly.
+Each session keeps its reserved price and paid status. Later runner heartbeats or
+exchange-rate updates affect new sessions. Every release immediately frees
+capacity, revokes the session token, and removes session channels and proxies.
+A runner stop gives in-flight HTTP, SSE, and WebSocket requests up to one second
+to finish; all other releases cancel them immediately. This applies to both
+persistent and single-shot sessions.
 
 Enabling a runner's proxy creates an automatic proxy. Without a URL
 template, generated URLs use `ServiceURL/run/{proxy}`. The earlier

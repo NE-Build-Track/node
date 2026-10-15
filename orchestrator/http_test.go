@@ -105,12 +105,23 @@ func TestSessionCallbackCredentials(t *testing.T) {
 	require.NoError(t, err)
 	_, otherToken, _, err := registry.sessionTarget("r", other)
 	require.NoError(t, err)
-	for _, path := range []string{"proxy", "stop"} {
-		req := httptest.NewRequest(http.MethodPost, "/runner/r/session/"+sid+"/"+path, strings.NewReader(`{}`))
-		req.Header.Set("Livepeer-Session-Token", otherToken)
-		w := httptest.NewRecorder()
-		server.ServeHTTP(w, req)
-		require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+	for _, operation := range []struct{ method, path string }{
+		{http.MethodPost, "proxy"},
+		{http.MethodPost, "channels"},
+		{http.MethodDelete, "channels"},
+		{http.MethodPost, "stop"},
+	} {
+		for name, credential := range map[string]string{"missing": "", "wrong": "wrong", "cross-session": otherToken} {
+			t.Run(operation.method+" "+operation.path+"/"+name, func(t *testing.T) {
+				req := httptest.NewRequest(operation.method, "/runner/r/session/"+sid+"/"+operation.path, strings.NewReader(`{}`))
+				if credential != "" {
+					req.Header.Set("Livepeer-Session-Token", credential)
+				}
+				w := httptest.NewRecorder()
+				server.ServeHTTP(w, req)
+				require.Equal(t, http.StatusUnauthorized, w.Code, w.Body.String())
+			})
+		}
 	}
 	for range 25 {
 		_, err := registry.addProxy("r", sid, token, target)

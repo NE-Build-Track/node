@@ -108,10 +108,15 @@ type session struct {
 	Created   time.Time
 	PriceInfo priceInfo
 	ctx       context.Context
-	cancel    context.CancelFunc
+	cancel    context.CancelCauseFunc
 }
 
 var errInvalidSessionToken = errors.New("invalid session token")
+
+// runnerStopped bounds the time existing proxy requests have to finish.
+type runnerStopped struct{ deadline time.Time }
+
+func (runnerStopped) Error() string { return "session stopped by runner" }
 
 type sessionProxy struct {
 	target *url.URL
@@ -365,7 +370,7 @@ func (r *Registry) Unregister(id, auth string) (int, error) {
 		return http.StatusUnauthorized, errors.New("invalid runner credential")
 	}
 	for sid := range current.Sessions {
-		r.releaseLocked(id, sid)
+		r.releaseLocked(id, sid, nil)
 	}
 	if r.onEvent != nil {
 		r.onEvent(id, "unregistered", "")
@@ -470,14 +475,14 @@ func (r *Registry) reserveWithPrice(id, requestedID string, agreed *priceInfo) (
 	if agreed != nil {
 		price = *agreed
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	item.Sessions[sessionID] = &session{pending: agreed != nil, ID: sessionID, Token: token, Created: time.Now(), Proxies: map[string]sessionProxy{}, PriceInfo: price, ctx: ctx, cancel: cancel}
 	appURL := r.appURL(id, item.Mode, sessionID)
 	if item.Proxy && item.Mode == "persistent" {
 		target, _ := url.Parse(item.RunnerURL)
 		proxyID, err := randomID(10)
 		if err != nil {
-			cancel()
+			cancel(nil)
 			delete(item.Sessions, sessionID)
 			return "", "", "", http.StatusInternalServerError, err
 		}
@@ -542,7 +547,7 @@ func (r *Registry) ReleaseBySession(sid string) {
 	defer r.mu.Unlock()
 	for id, item := range r.runners {
 		if item.Sessions[sid] != nil {
-			r.releaseLocked(id, sid)
+			r.releaseLocked(id, sid, nil)
 			return
 		}
 	}
@@ -558,18 +563,22 @@ func (r *Registry) release(id, sid, token string, callback bool) (int, error) {
 	if callback && !equalSecret(item.Sessions[sid].Token, token) {
 		return http.StatusUnauthorized, errInvalidSessionToken
 	}
-	r.releaseLocked(id, sid)
+	var cause error
+	if callback {
+		cause = runnerStopped{deadline: time.Now().Add(time.Second)}
+	}
+	r.releaseLocked(id, sid, cause)
 	return http.StatusOK, nil
 }
 
 // releaseLocked is the single teardown path for capacity and active requests.
 // The caller holds r.mu; cancellation never waits for the request to finish.
-func (r *Registry) releaseLocked(id, sid string) {
+func (r *Registry) releaseLocked(id, sid string, cause error) {
 	item := r.runners[id]
 	if item == nil || item.Sessions[sid] == nil {
 		return
 	}
-	item.Sessions[sid].cancel()
+	item.Sessions[sid].cancel(cause)
 	delete(item.Sessions, sid)
 	if r.onEvent != nil {
 		r.onEvent(id, "released", sid)
@@ -592,7 +601,7 @@ func (r *Registry) Close() {
 	r.closed = true
 	for id, item := range r.runners {
 		for sid := range item.Sessions {
-			r.releaseLocked(id, sid)
+			r.releaseLocked(id, sid, nil)
 		}
 		if r.onEvent != nil {
 			r.onEvent(id, "unregistered", "")
@@ -664,7 +673,7 @@ func (r *Registry) Expire() {
 	for id, item := range r.runners {
 		if !item.Static && time.Since(item.Last) > r.ttl {
 			for sid := range item.Sessions {
-				r.releaseLocked(id, sid)
+				r.releaseLocked(id, sid, nil)
 			}
 			if r.onEvent != nil {
 				r.onEvent(id, "expired", "")
@@ -779,7 +788,7 @@ func (r *Registry) checkStaticHealth(ctx context.Context, client *http.Client, i
 		item.Healthy = healthy
 		if !healthy {
 			for sid := range item.Sessions {
-				r.releaseLocked(id, sid)
+				r.releaseLocked(id, sid, nil)
 			}
 		}
 	}

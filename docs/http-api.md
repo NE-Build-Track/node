@@ -189,10 +189,9 @@ are rejected.
 ## Lifecycle and response codes
 
 Registration defaults omitted capacity to one and normalizes price unit and
-currency whitespace and case. Session price and paid status stay fixed across
-heartbeats and rate updates. Release interrupts active HTTP, SSE, and WebSocket
-requests in both session modes. See [sessions and proxies](orchestrator.md#sessions-and-proxies)
-and the [Trickle protocol](../trickle/README.md) for channel behavior.
+currency whitespace and case. See [sessions and proxies](orchestrator.md#sessions-and-proxies)
+for session pricing and release behavior, and the [Trickle protocol](../trickle/README.md)
+for channel behavior.
 
 | Signer status | Client action |
 | --- | --- |
