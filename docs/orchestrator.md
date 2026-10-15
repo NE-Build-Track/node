@@ -57,6 +57,8 @@ RunnerGrants = ["127.0.0.1"]
 HealthGrants = ["127.0.0.1:9000"]
 ```
 
+To allow a private subnet, use a CIDR such as `"192.168.1.0/24"` in each setting.
+
 Outbound HTTPS uses system certificate trust. Ethereum RPC connections do not
 require grants.
 

@@ -159,18 +159,21 @@ Controller = '0x0000000000000000000000000000000000000001'
 OrchestratorAddress = '0x0000000000000000000000000000000000000011'
 WeiPerUSD = '1/2'
 KeystoreFile = '/missing/account.json'
+RunnerGrants = ['10.0.0.0/8', 'fc00::/7']
 `)
 			test.WriteConfig(t, path, string(config))
 			for key, value := range map[string]string{
 				"SERVICE_URL": "https://env.example", "BOOTSTRAP_SECRET": "super-secret-env", "LISTEN": "127.0.0.1:8001",
 				"REDEEMER_MAX_FEE_PER_GAS": "200", "CHAIN_ID": "2",
 				"CONTROLLER_ADDRESS": "0x0000000000000000000000000000000000000002", "WEI_PER_USD": "2/3",
+				"SESSION_PROXY_GRANTS": "10.0.0.0/8,fc00::/7",
 			} {
 				t.Setenv("LIVEPEER_ORCHESTRATOR_"+key, value)
 			}
 			output, err := execute(t, "--config", path, "--listen", "127.0.0.1:8002",
 				"--service-url", "https://user:password@flag.example", "--redeemer-max-fee-per-gas", "300",
-				"--chain-id", "3", "--controller-address", "0x0000000000000000000000000000000000000003", "--print-config")
+				"--chain-id", "3", "--controller-address", "0x0000000000000000000000000000000000000003",
+				"--health-grants", "10.0.0.0/8,fc00::/7", "--print-config")
 			require.NoError(t, err)
 			require.Contains(t, output, "127.0.0.1:8002")
 			for _, absent := range []string{"127.0.0.1:8001", "127.0.0.1:8000", "password", "keystore", "/missing/", "flag.example", "env.example", "super-secret-env", "keystore-secret", path} {
@@ -179,6 +182,9 @@ KeystoreFile = '/missing/account.json'
 			require.Contains(t, output, `RedeemerMaxFeePerGas = "300"`)
 			var printed map[string]any
 			require.NoError(t, toml.Unmarshal([]byte(output), &printed))
+			for _, key := range []string{"RunnerGrants", "SessionProxyGrants", "HealthGrants"} {
+				require.Equal(t, []any{"10.0.0.0/8", "fc00::/7"}, printed[key], key)
+			}
 			require.EqualValues(t, 3, printed["ChainID"])
 			require.Equal(t, "0x0000000000000000000000000000000000000003", printed["Controller"])
 			require.Equal(t, "0x0000000000000000000000000000000000000011", printed["OrchestratorAddress"])
@@ -281,6 +287,11 @@ func TestSecretFilesPreserveBytesAndRedactErrors(t *testing.T) {
 
 func TestValidationBeforeStartup(t *testing.T) {
 	t.Setenv("LIVEPEER_ORCHESTRATOR_BOOTSTRAP_SECRET", "test")
+	for _, flag := range []string{"--runner-grants", "--session-proxy-grants", "--health-grants"} {
+		_, err := execute(t, "--config", "", flag, "10.0.0.0/33")
+		require.ErrorContains(t, err, flag+" destination grant")
+		require.True(t, boa.IsUserInputError(err))
+	}
 	db := filepath.Join(t.TempDir(), "payments.sqlite")
 	_, err := execute(t, "--redeemer-db", db)
 	require.ErrorContains(t, err, "on-chain payments require")

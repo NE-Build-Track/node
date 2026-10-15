@@ -189,9 +189,10 @@ func TestSignerDiscoveryGrantConfiguration(t *testing.T) {
 		bad    bool
 	}{
 		{name: "omitted"},
-		{name: "CLI", args: []string{"--discovery-grants", "127.0.0.1:8935,::1"}, want: []string{"127.0.0.1:8935", "::1"}},
-		{name: "environment", env: "127.0.0.1:8935,::1", want: []string{"127.0.0.1:8935", "::1"}},
-		{name: "TOML", config: "DiscoveryGrants = ['127.0.0.1:8935', '::1']\n", want: []string{"127.0.0.1:8935", "::1"}},
+		{name: "CLI", args: []string{"--discovery-grants", "127.0.0.1:8935,::1,10.0.0.0/8,fc00::/7"}, want: []string{"127.0.0.1:8935", "::1", "10.0.0.0/8", "fc00::/7"}},
+		{name: "environment", env: "127.0.0.1:8935,::1,10.0.0.0/8,fc00::/7", want: []string{"127.0.0.1:8935", "::1", "10.0.0.0/8", "fc00::/7"}},
+		{name: "TOML", config: "DiscoveryGrants = ['127.0.0.1:8935', '::1', '10.0.0.0/8', 'fc00::/7']\n", want: []string{"127.0.0.1:8935", "::1", "10.0.0.0/8", "fc00::/7"}},
+		{name: "invalid CIDR CLI", args: []string{"--discovery-grants", "10.0.0.0/33"}, bad: true},
 		{name: "invalid CLI", args: []string{"--discovery-grants", "ftp://localhost"}, bad: true},
 		{name: "invalid environment", env: "127.0.0.1:0", bad: true},
 		{name: "invalid TOML", config: "DiscoveryGrants = ['[::1]:65536']\n", bad: true},

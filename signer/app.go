@@ -54,7 +54,7 @@ type Params struct {
 	KeystorePassword       *string              `secret:"true" required:"true" descr:"Keystore decryption password"`
 	KeystorePasswordFile   string               `basepath:"source" secretfor:"KeystorePassword" descr:"Owner-only file containing the exact keystore password bytes"`
 	Orchestrators          []boa.Text[*url.URL] `name:"orchestrators" optional:"true"`
-	DiscoveryGrants        []string             `name:"discovery-grants" optional:"true" descr:"Private discovery IP[:port] grants"`
+	DiscoveryGrants        []string             `name:"discovery-grants" optional:"true" descr:"Private discovery IP[:port] or CIDR grants"`
 }
 
 func (p Params) payerPolicy() (pm.PayerPolicy, error) {

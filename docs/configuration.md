@@ -69,8 +69,9 @@ redemption `--submit` are also command-line-only controls.
 Grants allow local, private, or other restricted destinations; public addresses
 need none. Permissions apply per purpose, including redirects.
 
-All `*-grants` accept a literal IP or `IP:port` (`[IPv6]:port` for IPv6).
-A bare IP permits any port at that address, but not hostnames that resolve to it.
+All `*-grants` accept a literal IP, `IP:port` (`[IPv6]:port` for IPv6), or a CIDR
+such as `192.168.1.0/24` or `fc00::/7`. A bare IP or CIDR permits any port.
+Grants apply only to literal IP destinations, not hostnames resolving to them.
 
 ## Credential files
 

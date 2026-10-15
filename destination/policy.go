@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -53,25 +55,33 @@ func Public(ip netip.Addr) bool {
 	return true
 }
 
-// Policy grants purpose-specific literal IP destinations, with optional ports.
+// Policy grants purpose-specific literal IP destinations and CIDR subnets.
 // Keep separate instances for runners, webhooks and discovery.
 type Policy struct {
 	Purpose string
 	Grants  map[netip.AddrPort]struct{} // Port zero permits any port.
 	Lookup  func(context.Context, string) ([]net.IPAddr, error)
+	subnets []netip.Prefix
 }
 
-// New accepts literal IP addresses or IP:port grants. A bare IP permits any port.
+// New accepts literal IP addresses, IP:port grants, or CIDR subnets.
+// A bare IP or subnet permits any port.
 func New(purpose string, grants []string) (Policy, error) {
 	p := Policy{Purpose: purpose, Grants: map[netip.AddrPort]struct{}{}}
 	for _, raw := range grants {
-		if ip, err := netip.ParseAddr(raw); err == nil {
+		if prefix, err := netip.ParsePrefix(raw); err == nil && !prefix.Addr().Is4In6() {
+			p.subnets = append(p.subnets, prefix)
+			continue
+		}
+		// A slash denotes CIDR syntax even when ParseAddr accepts it in a zone.
+		slash := strings.Contains(raw, "/")
+		if ip, err := netip.ParseAddr(raw); err == nil && !slash {
 			p.Grants[netip.AddrPortFrom(ip.Unmap(), 0)] = struct{}{}
 			continue
 		}
 		endpoint, err := netip.ParseAddrPort(raw)
-		if err != nil || endpoint.Port() == 0 {
-			return Policy{}, fmt.Errorf("invalid %s destination grant: expected an IP address or IP:port with port between 1 and 65535", purpose)
+		if err != nil || endpoint.Port() == 0 || slash {
+			return Policy{}, fmt.Errorf("invalid %s destination grant: expected an IP address, CIDR subnet, or IP:port with port between 1 and 65535", purpose)
 		}
 		p.Grants[netip.AddrPortFrom(endpoint.Addr().Unmap(), endpoint.Port())] = struct{}{}
 	}
@@ -86,7 +96,7 @@ func (p Policy) granted(addr string) bool {
 	ip := endpoint.Addr().Unmap()
 	_, exact := p.Grants[netip.AddrPortFrom(ip, endpoint.Port())]
 	_, anyPort := p.Grants[netip.AddrPortFrom(ip, 0)]
-	return exact || anyPort
+	return exact || anyPort || slices.ContainsFunc(p.subnets, func(subnet netip.Prefix) bool { return subnet.Contains(ip) })
 }
 
 // ParseURL parses a string at an input boundary and validates the destination.

@@ -108,7 +108,7 @@ func TestRealBinaryOffchainFlow(t *testing.T) {
 	metricsURL := fmt.Sprintf("http://127.0.0.1:%d", metricsPort)
 	secretPath := filepath.Join(t.TempDir(), "bootstrap")
 	require.NoError(t, os.WriteFile(secretPath, []byte("exact-bootstrap"), 0600))
-	cmd := exec.Command(dispatcher, "orchestrator", "--listen", fmt.Sprintf("127.0.0.1:%d", mainPort), "--metrics-listen", fmt.Sprintf("127.0.0.1:%d", metricsPort), "--bootstrap-secret-file", secretPath, "--runner-grants", "127.0.0.1", "--session-proxy-grants", strings.TrimPrefix(runner.URL, "http://"))
+	cmd := exec.Command(dispatcher, "orchestrator", "--listen", fmt.Sprintf("127.0.0.1:%d", mainPort), "--metrics-listen", fmt.Sprintf("127.0.0.1:%d", metricsPort), "--bootstrap-secret-file", secretPath, "--runner-grants", "127.0.0.0/8", "--session-proxy-grants", strings.TrimPrefix(runner.URL, "http://"))
 	var log bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &log, &log
 	require.NoError(t, cmd.Start())

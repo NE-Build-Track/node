@@ -113,9 +113,11 @@ func TestHTTPSRejectsUntrustedCertificate(t *testing.T) {
 }
 
 func TestInvalidGrants(t *testing.T) {
-	for _, raw := range []string{"", "localhost", "localhost:443", "127.0.0.1:", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:abc", "[::1]", "[::1]:0", "[::1]:65536", "127.0.0.0/8", "::1/128", "127.0.0.*", "127.0.0.1,::1", "http://127.0.0.1:9000", "https://user:password@127.0.0.1", "127.0.0.1/path"} {
+	for _, raw := range []string{"", "localhost", "localhost:443", "127.0.0.1:", "127.0.0.1:0", "127.0.0.1:65536", "127.0.0.1:abc", "[::1]", "[::1]:0", "[::1]:65536", "127.0.0.*", "127.0.0.1,::1", "http://127.0.0.1:9000", "https://user:password@127.0.0.1", "127.0.0.1/path",
+		"10.0.0.0/33", "::1/129", "10.0.0.0/24:9000", "[::1/128]:9000", "fe80::%en0/64", "[fe80::1%en0/64]:9000",
+		"::ffff:192.168.1.0/24", "::ffff:192.168.1.0/120"} {
 		_, err := New("discovery", []string{raw})
-		require.Error(t, err, raw)
+		require.ErrorContains(t, err, "expected an IP address, CIDR subnet, or IP:port", raw)
 		require.NotContains(t, err.Error(), "password")
 	}
 }
@@ -124,6 +126,7 @@ func TestGrants(t *testing.T) {
 	p, err := New("runner", []string{
 		"127.0.0.1", "127.0.0.2:09000", "::ffff:127.0.0.3", "[::ffff:127.0.0.4]:9000",
 		"0:0:0:0:0:0:0:1", "[::2]:9000", "fe80::1%en0", "[fe80::2%en0]:9000",
+		"192.168.0.42/24", "fc00::/7",
 	})
 	require.NoError(t, err)
 	p.Lookup = func(_ context.Context, host string) ([]net.IPAddr, error) {
@@ -140,6 +143,8 @@ func TestGrants(t *testing.T) {
 		"[fe80::1%en0]:9000": true, "[fe80::1%en1]:9000": false, "[fe80::1]:9000": false,
 		"[fe80::2%en0]:9000": true, "[fe80::2%en1]:9000": false, "[fe80::2%en0]:9001": false,
 		"8.8.8.8:443": true, "127.0.0.5:9000": false, "localhost:9000": false, "exact.local:9000": false,
+		"192.168.0.1:9000": true, "192.168.0.1:9001": true, "192.168.1.1:9000": false,
+		"[::ffff:192.168.0.255]:9000": true, "[fd00::1]:9000": true, "[fe00::1]:9000": false, "[fd00::1%en0]:9000": false,
 	} {
 		_, err := p.DialContext(ctx, "tcp", address)
 		if allowed {
@@ -151,7 +156,7 @@ func TestGrants(t *testing.T) {
 }
 
 func TestDNSAnswersRespectGrants(t *testing.T) {
-	p, err := New("runner", nil)
+	p, err := New("runner", []string{"0.0.0.0/0", "::/0"})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()

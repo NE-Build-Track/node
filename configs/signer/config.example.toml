@@ -15,7 +15,7 @@ KeystorePasswordFile = "/run/secrets/livepeer-signer-keystore-password"
 # Orchestrators to use
 Orchestrators = []
 
-# Any allowed internal / private hosts for discovery; see docs/signer.md
+# Private discovery IPs, IP:port, or CIDRs such as "10.0.0.0/8"; see docs/signer.md.
 DiscoveryGrants = []
 
 # The signer requires an on-chain connection at startup.
