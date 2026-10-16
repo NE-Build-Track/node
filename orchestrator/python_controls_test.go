@@ -50,7 +50,7 @@ func TestPinnedPythonRequestSessionControls(t *testing.T) {
 	registry.service = "http://" + orch.Listener.Addr().String()
 	orch.Start()
 	fixture := filepath.Join(root, "cmd", "livepeer", "testdata", "python_runner_session_controls.py")
-	cmd := exec.Command(python, fixture, orch.URL, "bootstrap", "unused", "request-controls", "persistent", "python-controls", "1", "metadata")
+	cmd := exec.Command(python, fixture, orch.URL, "bootstrap", "unused", "request-controls", "persistent", "1", "metadata")
 	cmd.Env = append(os.Environ(), "PYTHONPATH="+filepath.Join(export, "src"))
 	stdin, err := cmd.StdinPipe()
 	require.NoError(t, err)

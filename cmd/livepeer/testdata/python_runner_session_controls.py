@@ -93,9 +93,8 @@ async def main():
             runner_url=runner_url,
             app=sys.argv[4],
             mode=sys.argv[5],
-            label=sys.argv[6],
-            capacity=int(sys.argv[7]),
-            metadata=sys.argv[8],
+            capacity=int(sys.argv[6]),
+            metadata=sys.argv[7],
             auto_detect_gpu=False,
             heartbeat_interval_s=60,
         )

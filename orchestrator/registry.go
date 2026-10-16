@@ -55,7 +55,6 @@ func (g *runnerGPU) UnmarshalJSON(data []byte) error {
 
 type heartbeatRequest struct {
 	RunnerID   string     `json:"runner_id"`
-	Label      string     `json:"label"`
 	RunnerURL  string     `json:"runner_url"`
 	Version    string     `json:"version"`
 	Metadata   string     `json:"metadata"`
@@ -687,7 +686,6 @@ func (r *Registry) Expire() {
 
 type StaticRunner struct {
 	ID         string
-	Label      string
 	Proxy      bool
 	RunnerURL  string
 	Version    string
@@ -706,7 +704,7 @@ func (r *Registry) AddStatic(config StaticRunner) error {
 	if !validRouteID(config.ID) {
 		return errors.New("static runner id must be a route-safe identifier")
 	}
-	req := heartbeatRequest{RunnerID: config.ID, Label: config.Label, Proxy: config.Proxy, RunnerURL: config.RunnerURL, Version: config.Version, Metadata: config.Metadata, GPU: config.GPU, App: config.App, Mode: config.Mode, Status: config.Status, Capacity: config.Capacity, PriceInfo: config.PriceInfo}
+	req := heartbeatRequest{RunnerID: config.ID, Proxy: config.Proxy, RunnerURL: config.RunnerURL, Version: config.Version, Metadata: config.Metadata, GPU: config.GPU, App: config.App, Mode: config.Mode, Status: config.Status, Capacity: config.Capacity, PriceInfo: config.PriceInfo}
 	if err := validateHeartbeat(&req); err != nil {
 		return fmt.Errorf("static runner %s: %w", config.ID, err)
 	}
