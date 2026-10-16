@@ -31,8 +31,8 @@ GPU and price tables use `[Runners.GPU]` and `[Runners.PriceInfo]`. Use the
 runner's ID, URL, application, mode, capacity, and health check. If you use only
 static runners, omit `BootstrapSecretFile`. Their health URLs are checked
 every `HeartbeatInterval` (five seconds by default). A runner with a health URL
-is unavailable until its first successful check; failed checks release its
-sessions.
+is unavailable until its first successful check; three consecutive failed checks
+release its sessions.
 
 Discovery at `GET /discovery` lists available runners. Off-chain operation
 accepts quoted runner prices but advertises free service. Enable the payment

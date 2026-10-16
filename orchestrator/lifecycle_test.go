@@ -217,10 +217,18 @@ func TestHealthFailureAndExhaustionCleanUpSession(t *testing.T) {
 			require.True(t, ok)
 			app.newChannel("owned", "events", "application/octet-stream", "r", sid)
 			if reason == "health" {
-				health := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
-				defer health.Close()
-				reg.runners["r"].HealthURL = health.URL
-				reg.CheckStaticHealth(t.Context(), health.Client())
+				reg.runners["r"].HealthURL = "http://health.example/healthz"
+				health := &http.Client{}
+				for _, code := range []int{503, 503, 200, 503, 503} {
+					health.Transport = roundTripFunc(func(*http.Request) (*http.Response, error) {
+						return &http.Response{StatusCode: code, Body: http.NoBody}, nil
+					})
+					reg.CheckStaticHealth(t.Context(), health)
+					require.NoError(t, ctx.Err())
+					require.Len(t, reg.Discovery()[0].Runners, 1)
+				}
+				reg.CheckStaticHealth(t.Context(), health)
+				require.Empty(t, reg.Discovery()[0].Runners)
 			} else {
 				store, err := OpenRedeemerDB(filepath.Join(t.TempDir(), "payments.sqlite"))
 				require.NoError(t, err)

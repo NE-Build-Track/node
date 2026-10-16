@@ -98,6 +98,8 @@ type runner struct {
 	HealthURL  string
 	HealthCode int
 	Sessions   map[string]*session
+
+	healthFailures int
 }
 
 type session struct {
@@ -785,6 +787,12 @@ func (r *Registry) checkStaticHealth(ctx context.Context, client *http.Client, i
 	}
 	r.mu.Lock()
 	if item := r.runners[id]; item != nil && item.Static {
+		if healthy {
+			item.healthFailures = 0
+		} else {
+			item.healthFailures++
+			healthy = item.Healthy && item.healthFailures < 3
+		}
 		item.Healthy = healthy
 		if !healthy {
 			for sid := range item.Sessions {
