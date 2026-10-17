@@ -72,23 +72,25 @@ return 400; admission exhaustion returns 503.
 
 ### Discovery filters and results
 
-The signer appends `/discovery` to each base URL in `Orchestrators` and queries
-those sources on every request, with a five-second timeout and 1 MiB response
+The signer uses complete discovery URLs supplied by the webhook, or appends
+`/discovery` to each `Orchestrators` base URL when no webhook is configured. It
+queries these sources on every request, with a five-second timeout and 1 MiB response
 limit per source. It filters runners by exact `app` and `gpu` query values;
 `gpu` matches the GPU name. Repeated values match any value within that filter;
 when both filters are present, a runner must satisfy both. `caps` does not
 filter this endpoint.
 
-Each result contains `address`, `score` (currently 1), `runners`, and a UTC
+Each result contains `address`, `runners`, and a UTC
 `last_seen` timestamp for the successful response. Runner records carry their
 URL, application, mode, capacity, optional metadata/GPU, and advertised prices.
 Discovery does not apply the signer's payment price ceilings or merge duplicate
 entries. Failed or blocked sources are omitted when another source
 succeeds. A successful source with no matching runners yields HTTP 200 and
-`[]`; no configured sources or failure of every source yields 503.
+`[]`; no candidates or failure of every source yields 503.
 
 Grants apply to outbound connections; returned URLs are not filtered. See
-[discovery configuration](signer.md#configure-discovery) for setup.
+[discovery configuration](signer.md#configure-discovery) for setup and
+[webhook behavior](signer.md#orchestrator-discovery-webhook).
 
 ### Payment limits and refresh
 

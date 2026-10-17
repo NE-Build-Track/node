@@ -51,8 +51,9 @@ type Service struct {
 	authHeaders     Headers
 	key             pm.TicketSigner
 	mux             *http.ServeMux
-	discoveryURLs   []*url.URL
+	discoveryURLs   func(context.Context) []*url.URL
 	discoveryClient *http.Client
+	orchWebhook     *orchestratorWebhook
 	paymentChain    pm.PayerChain
 	payerPolicy     pm.PayerPolicy
 	pricePolicy     *pricePolicy
@@ -81,7 +82,8 @@ func validateDiscoveryURL(endpoint *url.URL) error {
 }
 
 // SetDiscovery configures discovery sources. Private destinations, including
-// redirect targets, require a discovery grant.
+// redirect targets, require a discovery grant. Configure before starting workers
+// or serving requests.
 func (s *Service) SetDiscovery(orchestrators []*url.URL, grants ...string) error {
 	policy, err := destination.New("signer-discovery", grants)
 	if err != nil {
@@ -100,7 +102,9 @@ func (s *Service) SetDiscovery(orchestrators []*url.URL, grants ...string) error
 	client.Timeout = 5 * time.Second
 	previous := s.discoveryClient
 	s.discoveryClient = client
-	s.discoveryURLs = urls
+	if s.orchWebhook == nil {
+		s.discoveryURLs = func(context.Context) []*url.URL { return urls }
+	}
 	if previous != nil {
 		previous.CloseIdleConnections()
 	}
@@ -125,7 +129,13 @@ func (s *Service) Close() error {
 }
 
 func newService(key *eth.Key) *Service {
-	s := &Service{key: key, mux: http.NewServeMux(), payerPolicy: pm.DefaultPayerPolicy(), slots: make(chan struct{}, 64)}
+	s := &Service{
+		key:           key,
+		mux:           http.NewServeMux(),
+		payerPolicy:   pm.DefaultPayerPolicy(),
+		slots:         make(chan struct{}, 64),
+		discoveryURLs: func(context.Context) []*url.URL { return nil },
+	}
 	s.mux.HandleFunc("POST /sign-orchestrator-info", s.signInfo)
 	s.mux.HandleFunc("POST /generate-live-payment", s.generate)
 	s.mux.HandleFunc("GET /discover-orchestrators", s.discover)
@@ -205,22 +215,22 @@ type discoveredRunner struct {
 }
 type discoveredOrchestrator struct {
 	Address  string             `json:"address"`
-	Score    float32            `json:"score"`
 	Runners  []discoveredRunner `json:"runners"`
 	LastSeen time.Time          `json:"last_seen"`
 }
 
 func (s *Service) discover(w http.ResponseWriter, r *http.Request) {
-	if len(s.discoveryURLs) == 0 {
-		slog.WarnContext(r.Context(), "signer discovery has no configured sources")
-		signerError(w, http.StatusServiceUnavailable, "no orchestrator discovery source configured")
+	sources := s.discoveryURLs(r.Context())
+	if len(sources) == 0 {
+		slog.WarnContext(r.Context(), "signer discovery has no available sources")
+		signerError(w, http.StatusServiceUnavailable, "no orchestrator discovery sources available")
 		return
 	}
 	appFilter := r.URL.Query()["app"]
 	gpuFilter := r.URL.Query()["gpu"]
 	available := false
-	result := make([]discoveredOrchestrator, 0, len(s.discoveryURLs))
-	for source, endpoint := range s.discoveryURLs {
+	result := make([]discoveredOrchestrator, 0, len(sources))
+	for source, endpoint := range sources {
 		u := *endpoint
 		query := u.Query()
 		for _, app := range appFilter {
@@ -284,7 +294,7 @@ func (s *Service) discover(w http.ResponseWriter, r *http.Request) {
 				filtered = append(filtered, runner)
 			}
 			if len(filtered) > 0 {
-				result = append(result, discoveredOrchestrator{Address: entry.Address, Score: 1, Runners: filtered, LastSeen: time.Now().UTC()})
+				result = append(result, discoveredOrchestrator{Address: entry.Address, Runners: filtered, LastSeen: time.Now().UTC()})
 			}
 		}
 	}

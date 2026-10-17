@@ -87,9 +87,8 @@ Orchestrators = ["http://127.0.0.1:8935"]
 DiscoveryGrants = ["127.0.0.1:8935"]
 ```
 
-The signer queries each configured orchestrator's `/discovery` endpoint when
-a client calls `GET /discover-orchestrators`. These configured URLs are its
-discovery sources; it does not automatically build a list from the chain.
+The signer queries each orchestrator's `/discovery` endpoint when a client
+calls `GET /discover-orchestrators`.
 
 Query the signer to find runners:
 
@@ -114,6 +113,34 @@ configured limit. Finding a runner also does not reserve its capacity; the
 client must request a session or submit work at the returned URL. See the
 [discovery reference](http-api.md#discovery-filters-and-results) for result
 fields and filtering details.
+
+## Orchestrator discovery webhook
+
+To use a webhook instead of `Orchestrators`, configure:
+
+```toml
+OrchestratorWebhookFile = "/run/secrets/livepeer-signer-orchestrator-url"
+# OrchestratorWebhookHeadersFile = "/run/secrets/livepeer-signer-orchestrator-headers"
+OrchestratorWebhookRefreshInterval = "5m"
+```
+
+Use the [credential-file rules](configuration.md#credential-files) for URL and
+header secrets; private destinations need `DiscoveryGrants`.
+
+GET at the webhook URL returns `[{"address":"https://orch.example.com/discovery"}]`.
+Addresses are complete HTTP(S) discovery URLs without credentials, queries, or
+fragments. Invalid addresses and extra fields are ignored.
+
+The webhook has a three-second timeout and 1 MiB response limit; redirects
+are rejected.
+
+The signer fetches at startup and periodically (positive interval, default `5m`).
+Until the first successful list, discovery requests also trigger or await a fetch;
+failures return 503. Later requests use the cached list without waiting for refreshes.
+On refresh failure, the last cached list is used. A successful empty response clears it.
+
+Only the orchestrator URLs are cached. For each `GET /discover-orchestrators`
+request, the signer queries those URLs for the current runner list and available capacity.
 
 ## Connect a client
 

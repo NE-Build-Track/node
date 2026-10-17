@@ -61,6 +61,13 @@ func TestSignerConfigurationValidation(t *testing.T) {
 		{"metrics", func(p *Params) { p.MetricsListen = netip.MustParseAddrPort("0.0.0.0:8938") }, "loopback"},
 		{"zero deposit multiplier", func(p *Params) { p.DepositMultiplier = 0 }, "deposit multiplier"},
 		{"headers without webhook", func(p *Params) { p.AuthWebhookHeaders = Headers{"Authorization": {"Bearer token"}} }, "webhook URL"},
+		{"orchestrator headers without webhook", func(p *Params) { p.OrchestratorWebhookHeaders = Headers{"Authorization": {"Bearer token"}} }, "orchestrator webhook URL"},
+		{"orchestrator webhook interval", func(p *Params) { p.OrchestratorWebhook = testURL(t, "https://webhook.example") }, "orchestrator-webhook-refresh-interval"},
+		{"negative webhook interval", func(p *Params) {
+			p.OrchestratorWebhook = testURL(t, "https://webhook.example")
+			p.OrchestratorWebhookRefreshInterval = -time.Minute
+		}, "orchestrator-webhook-refresh-interval"},
+		{"invalid orchestrator webhook", func(p *Params) { p.OrchestratorWebhook = testURL(t, "https://user:secret@webhook.example") }, "orchestrator webhook URL"},
 		{"invalid discovery grant", func(p *Params) { p.DiscoveryGrants = []string{"ftp://localhost"} }, "signer-discovery destination grant"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -125,6 +132,9 @@ KeystorePasswordFile = "password"
 RPCURLFile = "rpc"
 AuthWebhookFile = "webhook"
 AuthWebhookHeadersFile = "headers"
+OrchestratorWebhookFile = "webhook"
+OrchestratorWebhookHeadersFile = "headers"
+OrchestratorWebhookRefreshInterval = "2m"
 ChainID = 42161
 Controller = "0xD8E8328501E9645d16Cf49539efC04f734606ee4"
 ETHUSDFeed = "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612"
@@ -138,8 +148,17 @@ DiscoveryGrants = ["127.0.0.1:8935"]
 			configFile := filepath.Join(folder, "signer"+ext)
 			test.WriteConfig(t, configFile, config)
 			var p Params
-			cmd := boa.Cmd[Params]{Params: &p, RawArgs: []string{"--config", configFile, "--data-dir", t.TempDir()}, RejectUnknown: true}
-			require.NoError(t, cmd.Validate())
+			cmd := boa.Cmd[Params]{Params: &p, RawArgs: []string{"--config", configFile, "--data-dir", t.TempDir()}, RejectUnknown: true,
+				RunFuncCtxE: func(ctx *boa.HookContext, p *Params, _ *cobra.Command, _ []string) error {
+					dumped, err := ctx.DumpBytes(".toml", nil)
+					require.NoError(t, err)
+					require.NotContains(t, string(dumped), p.OrchestratorWebhook.String())
+					require.NotContains(t, string(dumped), http.Header(p.OrchestratorWebhookHeaders).Get("Authorization"))
+					require.Contains(t, string(dumped), "OrchestratorWebhookRefreshInterval")
+					return p.Validate()
+				},
+			}
+			require.NoError(t, cmd.RunArgsE(cmd.RawArgs))
 			require.Equal(t, uint64(42161), *p.ChainID)
 			require.Equal(t, "0xD8E8328501E9645d16Cf49539efC04f734606ee4", p.Controller.Hex())
 			require.Equal(t, "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612", p.ETHUSDFeed.Hex())
@@ -150,12 +169,14 @@ DiscoveryGrants = ["127.0.0.1:8935"]
 			require.Equal(t, "private-token", p.RPCURL.Query().Get("key"))
 			require.Equal(t, "http://localhost:9000/auth", p.AuthWebhook.String())
 			require.Equal(t, "Bearer private-token", http.Header(p.AuthWebhookHeaders).Get("Authorization"))
+			require.Equal(t, "http://localhost:9000/auth", p.OrchestratorWebhook.String())
+			require.Equal(t, "Bearer private-token", http.Header(p.OrchestratorWebhookHeaders).Get("Authorization"))
+			require.Equal(t, 2*time.Minute, p.OrchestratorWebhookRefreshInterval)
 			require.Equal(t, big.NewRat(36, 1), p.MaxHourlyPrice)
 			require.Equal(t, big.NewRat(1, 2), p.MaxFixedPrice)
 			require.Equal(t, time.Hour, p.ETHUSDMaxAge)
 			require.Equal(t, "http://127.0.0.1:8935", p.Orchestrators[0].Value.String())
 			require.Equal(t, []string{"127.0.0.1:8935"}, p.DiscoveryGrants)
-			require.NoError(t, p.Validate())
 		})
 	}
 }
@@ -210,6 +231,38 @@ func TestSignerDiscoveryGrantConfiguration(t *testing.T) {
 	}
 }
 
+func TestSignerOrchestratorWebhookConfiguration(t *testing.T) {
+	t.Setenv("LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK", "https://webhook.example?token=private-token")
+	t.Setenv("LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK_HEADERS", "Authorization: Bearer private-header")
+	p, err := loadSignerParams(t, nil, "")
+	require.NoError(t, err)
+	require.Equal(t, 5*time.Minute, p.OrchestratorWebhookRefreshInterval)
+	require.Equal(t, "private-token", p.OrchestratorWebhook.Query().Get("token"))
+	require.Equal(t, "Bearer private-header", http.Header(p.OrchestratorWebhookHeaders).Get("Authorization"))
+	t.Setenv("LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK_REFRESH_INTERVAL", "45s")
+	p, err = loadSignerParams(t, nil, "")
+	require.NoError(t, err)
+	require.Equal(t, 45*time.Second, p.OrchestratorWebhookRefreshInterval)
+	p, err = loadSignerParams(t, []string{"--orchestrator-webhook-refresh-interval", "30s"}, "")
+	require.NoError(t, err)
+	require.Equal(t, 30*time.Second, p.OrchestratorWebhookRefreshInterval)
+}
+
+func TestSignerOrchestratorWebhookSecrets(t *testing.T) {
+	for _, flag := range []string{"--orchestrator-webhook", "--orchestrator-webhook-headers"} {
+		_, err := loadSignerParams(t, []string{flag, "private-secret"}, "")
+		require.ErrorContains(t, err, "unknown flag")
+		require.NotContains(t, err.Error(), "private-secret")
+	}
+	const endpoint = "https://webhook.example?token=private-token"
+	urlFile := filepath.Join(t.TempDir(), "webhook")
+	require.NoError(t, os.WriteFile(urlFile, []byte(endpoint), 0600))
+	t.Setenv("LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK", endpoint)
+	_, err := loadSignerParams(t, []string{"--orchestrator-webhook-file", urlFile}, "")
+	require.ErrorContains(t, err, "cannot both be set")
+	require.NotContains(t, err.Error(), "private-token")
+}
+
 func TestSignerReadiness(t *testing.T) {
 	for _, fixedRate := range []bool{true, false} {
 		t.Run(fmt.Sprintf("fixedRate=%v", fixedRate), func(t *testing.T) {
@@ -220,7 +273,13 @@ func TestSignerReadiness(t *testing.T) {
 			key, keyFile, passwordPath := testSignerKey(t)
 			p.KeystoreFile, p.KeystorePasswordFile = keyFile, passwordPath
 			var failure atomic.Int32
+			webhookCalled := make(chan struct{}, 1)
 			rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/list" {
+					webhookCalled <- struct{}{}
+					_, _ = io.WriteString(w, "[]")
+					return
+				}
 				var req struct {
 					Method string
 					Params []json.RawMessage
@@ -270,6 +329,9 @@ func TestSignerReadiness(t *testing.T) {
 			}))
 			defer rpc.Close()
 			p.RPCURL = testURL(t, rpc.URL)
+			p.OrchestratorWebhook = testURL(t, rpc.URL+"/list")
+			p.OrchestratorWebhookRefreshInterval = time.Hour
+			p.DiscoveryGrants = []string{"127.0.0.1"}
 			free := func() netip.AddrPort {
 				l, err := net.Listen("tcp", "127.0.0.1:0")
 				require.NoError(t, err)
@@ -302,6 +364,11 @@ func TestSignerReadiness(t *testing.T) {
 				}
 			})
 			client := &http.Client{Timeout: time.Second}
+			select {
+			case <-webhookCalled:
+			case <-time.After(3 * time.Second):
+				t.Fatal("signer did not start the webhook worker")
+			}
 			get := func(path string) int {
 				response, err := client.Get("http://" + p.MetricsListen.String() + path)
 				if err != nil {

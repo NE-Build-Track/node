@@ -15,7 +15,12 @@ KeystorePasswordFile = "/run/secrets/livepeer-signer-keystore-password"
 # Orchestrators to use
 Orchestrators = []
 
-# Private discovery IPs, IP:port, or CIDRs such as "10.0.0.0/8"; see docs/signer.md.
+# Optional discovery webhook; overrides Orchestrators. See docs/signer.md.
+# OrchestratorWebhookFile = "/run/secrets/livepeer-signer-orchestrator-url"
+# OrchestratorWebhookHeadersFile = "/run/secrets/livepeer-signer-orchestrator-headers"
+# OrchestratorWebhookRefreshInterval = "5m" # Duration between background refreshes.
+
+# Private webhook and discovery IPs, IP:port, or CIDRs; see docs/signer.md.
 DiscoveryGrants = []
 
 # The signer requires an on-chain connection at startup.

@@ -119,9 +119,10 @@ func (t *discoveryCloseTracker) CloseIdleConnections() { t.closed = true }
 func TestSignerDiscoveryReplacement(t *testing.T) {
 	s := newService(nil)
 	defer s.Close()
+	require.Equal(t, 503, discoveryResponse(s, "").Code)
 	endpoint := testURL(t, "https://orch.example/deployment/")
 	require.NoError(t, s.SetDiscovery([]*url.URL{endpoint}))
-	require.Equal(t, "https://orch.example/deployment/discovery", s.discoveryURLs[0].String())
+	require.Equal(t, "https://orch.example/deployment/discovery", s.discoveryURLs(t.Context())[0].String())
 	require.Equal(t, "/deployment/", endpoint.Path)
 	require.Equal(t, 5*time.Second, s.discoveryClient.Timeout)
 	previous := s.discoveryClient
@@ -133,9 +134,9 @@ func TestSignerDiscoveryReplacement(t *testing.T) {
 	}
 	require.Error(t, s.SetDiscovery([]*url.URL{endpoint}, "ftp://localhost"))
 	require.Same(t, previous, s.discoveryClient)
-	require.Equal(t, "https://orch.example/deployment/discovery", s.discoveryURLs[0].String())
+	require.Equal(t, "https://orch.example/deployment/discovery", s.discoveryURLs(t.Context())[0].String())
 	require.False(t, tracker.closed)
 	require.NoError(t, s.SetDiscovery(nil))
-	require.Empty(t, s.discoveryURLs)
+	require.Empty(t, s.discoveryURLs(t.Context()))
 	require.True(t, tracker.closed)
 }

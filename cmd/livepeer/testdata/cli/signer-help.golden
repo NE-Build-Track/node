@@ -10,38 +10,41 @@ Available Commands:
   migrate     Manage embedded SQL migrations
 
 Flags:
-  -c, --config string                      Configuration file; empty disables discovery (env: LIVEPEER_SIGNER_CONFIG) (default "config.toml")
-  -n, --network string                     Network name (custom networks require explicit chain settings) (env: LIVEPEER_SIGNER_NETWORK) (default "arbitrum-one-mainnet")
-  -d, --data-dir string                    Component data directory; defaults to ~/.lpData/<network>/<component> (env: LIVEPEER_SIGNER_DATA_DIR) (default "$HOME/.lpData/arbitrum-one-mainnet/signer")
-  -a, --account string                     Keystore account address (env: LIVEPEER_SIGNER_ACCOUNT)
-  -k, --kafka-broker string                One Kafka bootstrap address (TLS by default; kafka:// selects plaintext) (env: LIVEPEER_SIGNER_KAFKA_BROKER, required)
-      --kafka-topic string                 Kafka topic for signing events (env: LIVEPEER_SIGNER_KAFKA_TOPIC, required)
-      --kafka-auth-method string           SASL authentication method when credentials are supplied (env: LIVEPEER_SIGNER_KAFKA_AUTH_METHOD) (default "scram-sha-512")
-      --kafka-username-file string          (env: LIVEPEER_SIGNER_KAFKA_USERNAME_FILE)
-      --kafka-password-file string          (env: LIVEPEER_SIGNER_KAFKA_PASSWORD_FILE)
-      --kafka-outbox-db string             Durable signer event SQLite path (env: LIVEPEER_SIGNER_KAFKA_OUTBOX_DB) (default "events.sqlite")
-      --kafka-outbox-max-bytes int         Maximum pending event payload bytes (env: LIVEPEER_SIGNER_KAFKA_OUTBOX_MAX_BYTES) (default 268435456)
-      --auth-webhook-headers-file string    (env: LIVEPEER_SIGNER_AUTH_WEBHOOK_HEADERS_FILE)
-      --auth-webhook-file string            (env: LIVEPEER_SIGNER_AUTH_WEBHOOK_FILE)
-  -m, --max-ticket-ev string               Maximum expected ticket value in wei (env: LIVEPEER_SIGNER_MAX_TICKET_EV) (default "3000000000000")
-      --max-batch-ev string                Maximum expected batch value in wei (env: LIVEPEER_SIGNER_MAX_BATCH_EV) (default "20000000000000")
-      --deposit-multiplier int             Maximum face value is deposit divided by this value (env: LIVEPEER_SIGNER_DEPOSIT_MULTIPLIER) (default 1)
-      --max-hourly-price string            Maximum live price in USD per hour (env: LIVEPEER_SIGNER_MAX_HOURLY_PRICE, required)
-      --max-fixed-price string             Maximum fixed request price in USD (env: LIVEPEER_SIGNER_MAX_FIXED_PRICE, required)
-  -w, --wei-per-usd string                 Fixed wei per USD conversion, mostly for testing (env: LIVEPEER_SIGNER_WEI_PER_USD)
-  -e, --eth-usd-feed string                ETH/USD oracle address (env: LIVEPEER_SIGNER_ETH_USD_FEED)
-      --eth-usd-max-age duration           Maximum age of the ETH/USD oracle observation (env: LIVEPEER_SIGNER_ETH_USD_MAX_AGE) (default 2h0m0s)
-  -l, --listen string                       (env: LIVEPEER_SIGNER_LISTEN) (default "127.0.0.1:8937")
-      --metrics-listen string               (env: LIVEPEER_SIGNER_METRICS_LISTEN) (default "127.0.0.1:8938")
-      --rpc-url-file string                 (env: LIVEPEER_SIGNER_RPC_URL_FILE)
-      --chain-id uint                      Optional expected RPC chain ID (env: LIVEPEER_SIGNER_CHAIN_ID)
-      --controller-address string          Livepeer Controller address (env: LIVEPEER_SIGNER_CONTROLLER_ADDRESS)
-      --keystore-file string               Encrypted geth account JSON file; otherwise discover in keystore/ (env: LIVEPEER_SIGNER_KEYSTORE_FILE)
-      --keystore-password-file string      Owner-only file containing the exact keystore password bytes (env: LIVEPEER_SIGNER_KEYSTORE_PASSWORD_FILE)
-  -o, --orchestrators strings               (env: LIVEPEER_SIGNER_ORCHESTRATORS)
-      --discovery-grants strings           Private discovery IP[:port] or CIDR grants (env: LIVEPEER_SIGNER_DISCOVERY_GRANTS)
-  -h, --help                               help for livepeer-signer
-  -v, --version                            version for livepeer-signer
+  -c, --config string                                    Configuration file; empty disables discovery (env: LIVEPEER_SIGNER_CONFIG) (default "config.toml")
+  -n, --network string                                   Network name (custom networks require explicit chain settings) (env: LIVEPEER_SIGNER_NETWORK) (default "arbitrum-one-mainnet")
+  -d, --data-dir string                                  Component data directory; defaults to ~/.lpData/<network>/<component> (env: LIVEPEER_SIGNER_DATA_DIR) (default "$HOME/.lpData/arbitrum-one-mainnet/signer")
+  -a, --account string                                   Keystore account address (env: LIVEPEER_SIGNER_ACCOUNT)
+  -k, --kafka-broker string                              One Kafka bootstrap address (TLS by default; kafka:// selects plaintext) (env: LIVEPEER_SIGNER_KAFKA_BROKER, required)
+      --kafka-topic string                               Kafka topic for signing events (env: LIVEPEER_SIGNER_KAFKA_TOPIC, required)
+      --kafka-auth-method string                         SASL authentication method when credentials are supplied (env: LIVEPEER_SIGNER_KAFKA_AUTH_METHOD) (default "scram-sha-512")
+      --kafka-username-file string                        (env: LIVEPEER_SIGNER_KAFKA_USERNAME_FILE)
+      --kafka-password-file string                        (env: LIVEPEER_SIGNER_KAFKA_PASSWORD_FILE)
+      --kafka-outbox-db string                           Durable signer event SQLite path (env: LIVEPEER_SIGNER_KAFKA_OUTBOX_DB) (default "events.sqlite")
+      --kafka-outbox-max-bytes int                       Maximum pending event payload bytes (env: LIVEPEER_SIGNER_KAFKA_OUTBOX_MAX_BYTES) (default 268435456)
+      --auth-webhook-headers-file string                  (env: LIVEPEER_SIGNER_AUTH_WEBHOOK_HEADERS_FILE)
+      --auth-webhook-file string                          (env: LIVEPEER_SIGNER_AUTH_WEBHOOK_FILE)
+  -m, --max-ticket-ev string                             Maximum expected ticket value in wei (env: LIVEPEER_SIGNER_MAX_TICKET_EV) (default "3000000000000")
+      --max-batch-ev string                              Maximum expected batch value in wei (env: LIVEPEER_SIGNER_MAX_BATCH_EV) (default "20000000000000")
+      --deposit-multiplier int                           Maximum face value is deposit divided by this value (env: LIVEPEER_SIGNER_DEPOSIT_MULTIPLIER) (default 1)
+      --max-hourly-price string                          Maximum live price in USD per hour (env: LIVEPEER_SIGNER_MAX_HOURLY_PRICE, required)
+      --max-fixed-price string                           Maximum fixed request price in USD (env: LIVEPEER_SIGNER_MAX_FIXED_PRICE, required)
+  -w, --wei-per-usd string                               Fixed wei per USD conversion, mostly for testing (env: LIVEPEER_SIGNER_WEI_PER_USD)
+  -e, --eth-usd-feed string                              ETH/USD oracle address (env: LIVEPEER_SIGNER_ETH_USD_FEED)
+      --eth-usd-max-age duration                         Maximum age of the ETH/USD oracle observation (env: LIVEPEER_SIGNER_ETH_USD_MAX_AGE) (default 2h0m0s)
+  -l, --listen string                                     (env: LIVEPEER_SIGNER_LISTEN) (default "127.0.0.1:8937")
+      --metrics-listen string                             (env: LIVEPEER_SIGNER_METRICS_LISTEN) (default "127.0.0.1:8938")
+      --rpc-url-file string                               (env: LIVEPEER_SIGNER_RPC_URL_FILE)
+      --chain-id uint                                    Optional expected RPC chain ID (env: LIVEPEER_SIGNER_CHAIN_ID)
+      --controller-address string                        Livepeer Controller address (env: LIVEPEER_SIGNER_CONTROLLER_ADDRESS)
+      --keystore-file string                             Encrypted geth account JSON file; otherwise discover in keystore/ (env: LIVEPEER_SIGNER_KEYSTORE_FILE)
+      --keystore-password-file string                    Owner-only file containing the exact keystore password bytes (env: LIVEPEER_SIGNER_KEYSTORE_PASSWORD_FILE)
+  -o, --orchestrators strings                             (env: LIVEPEER_SIGNER_ORCHESTRATORS)
+      --discovery-grants strings                         Private discovery IP[:port] or CIDR grants (env: LIVEPEER_SIGNER_DISCOVERY_GRANTS)
+      --orchestrator-webhook-file string                  (env: LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK_FILE)
+      --orchestrator-webhook-headers-file string          (env: LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK_HEADERS_FILE)
+      --orchestrator-webhook-refresh-interval duration   Orchestrator webhook refresh interval; must be positive when enabled (env: LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK_REFRESH_INTERVAL) (default 5m0s)
+  -h, --help                                             help for livepeer-signer
+  -v, --version                                          version for livepeer-signer
 
 Use "livepeer-signer [command] --help" for more information about a command.
 
@@ -51,4 +54,6 @@ Environment Variables:
   LIVEPEER_SIGNER_AUTH_WEBHOOK
   LIVEPEER_SIGNER_AUTH_WEBHOOK_HEADERS
   LIVEPEER_SIGNER_RPC_URL
-  LIVEPEER_SIGNER_KEYSTORE_PASSWORD     Keystore decryption password
+  LIVEPEER_SIGNER_KEYSTORE_PASSWORD             Keystore decryption password
+  LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK
+  LIVEPEER_SIGNER_ORCHESTRATOR_WEBHOOK_HEADERS

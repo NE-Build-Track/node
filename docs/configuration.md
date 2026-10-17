@@ -75,8 +75,8 @@ Grants are checked against each resolved IP at connection time.
 
 ## Credential files
 
-RPC URLs, bootstrap credentials, keystore passwords, authorization webhook URLs
-and headers, and Kafka credentials are secrets. Supply each through its file
+RPC URLs, bootstrap credentials, keystore passwords, webhook URLs and headers,
+and Kafka credentials are secrets. Supply each through its file
 option or direct environment variable. Direct secret flags and TOML values are
 rejected, and a direct environment secret cannot be set together with its file
 option.

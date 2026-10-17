@@ -55,6 +55,12 @@ type Params struct {
 	KeystorePasswordFile   string               `basepath:"source" secretfor:"KeystorePassword" descr:"Owner-only file containing the exact keystore password bytes"`
 	Orchestrators          []boa.Text[*url.URL] `name:"orchestrators" optional:"true"`
 	DiscoveryGrants        []string             `name:"discovery-grants" optional:"true" descr:"Private discovery IP[:port] or CIDR grants"`
+
+	OrchestratorWebhook                *url.URL      `name:"orchestrator-webhook" optional:"true" secret:"true"`
+	OrchestratorWebhookFile            string        `basepath:"source" name:"orchestrator-webhook-file" secretfor:"OrchestratorWebhook"`
+	OrchestratorWebhookHeaders         Headers       `name:"orchestrator-webhook-headers" optional:"true" secret:"true"`
+	OrchestratorWebhookHeadersFile     string        `basepath:"source" name:"orchestrator-webhook-headers-file" secretfor:"OrchestratorWebhookHeaders"`
+	OrchestratorWebhookRefreshInterval time.Duration `name:"orchestrator-webhook-refresh-interval" default:"5m" descr:"Orchestrator webhook refresh interval; must be positive when enabled"`
 }
 
 func (p Params) payerPolicy() (pm.PayerPolicy, error) {
@@ -96,6 +102,11 @@ func (p Params) Validate() error {
 	}
 	if _, err := p.AuthWebhookHeaders.MarshalText(); err != nil {
 		return fmt.Errorf("invalid auth webhook headers (LIVEPEER_SIGNER_AUTH_WEBHOOK_HEADERS or --auth-webhook-headers-file): %w", err)
+	}
+	if p.OrchestratorWebhook != nil || len(p.OrchestratorWebhookHeaders) > 0 {
+		if err := validateOrchestratorWebhook(p.OrchestratorWebhook, p.OrchestratorWebhookHeaders, p.OrchestratorWebhookRefreshInterval); err != nil {
+			return err
+		}
 	}
 	if _, err := p.payerPolicy(); err != nil {
 		return fmt.Errorf("invalid payer limits (--max-ticket-ev, --max-batch-ev, --deposit-multiplier): %w", err)
@@ -187,6 +198,11 @@ func serve(parent context.Context, p Params) error {
 	if err := service.SetDiscovery(p.discoveryURLs(), p.DiscoveryGrants...); err != nil {
 		return err
 	}
+	if p.OrchestratorWebhook != nil {
+		if err := service.SetOrchestratorWebhook(p.OrchestratorWebhook, p.OrchestratorWebhookHeaders, p.OrchestratorWebhookRefreshInterval); err != nil {
+			return err
+		}
+	}
 	producer, err := openKafkaProducer(ctx, p.Kafka, key.Address().Hex())
 	if err != nil {
 		return err
@@ -236,6 +252,7 @@ func serve(parent context.Context, p Params) error {
 	if producer != nil {
 		workers.Go(func() { producer.run(publisherCtx) })
 	}
+	workers.Go(func() { service.RunOrchestratorWebhook(ctx) })
 	if p.WeiPerUSD == nil {
 		workers.Go(func() {
 			refreshPriceFeed(ctx, time.Hour, service.pricePolicy, func(readCtx context.Context) (*big.Rat, time.Time, error) {
