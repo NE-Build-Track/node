@@ -77,6 +77,32 @@ func reviewServer(t *testing.T, upstream string) (*Registry, *Server) {
 	reg := NewRegistry("bootstrap", "https://orch.example", time.Second, time.Minute)
 	return reg, NewServer(reg, p, p, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
+
+func TestRegressionProxySendsContinueBeforeBody(t *testing.T) {
+	// codifying receive of 100 Continue after headers
+	upstream := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+	}))
+	defer upstream.Close()
+	registry, server := reviewServer(t, upstream.URL)
+	defer server.Close()
+	require.NoError(t, registry.AddStatic(StaticRunner{ID: "one", RunnerURL: upstream.URL, App: "one", Mode: "single-shot", Capacity: 1}))
+	orch := httptest.NewServer(server)
+	defer orch.Close()
+	address := orch.Listener.Addr().String()
+	conn, err := net.DialTimeout("tcp", address, time.Second)
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(3*time.Second)))
+	// Advertise a body, but send no bytes: continuation must arrive first.
+	_, err = fmt.Fprintf(conn, "POST /apps/one/app HTTP/1.1\r\nHost: %s\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n", address)
+	require.NoError(t, err)
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	require.NoError(t, err)
+	defer response.Body.Close()
+	require.Equal(t, http.StatusContinue, response.StatusCode)
+}
+
 func TestRegressionOffchainSingleShotCapacityAndHeaders(t *testing.T) {
 	seen := make(chan http.Header, 2)
 	release := make(chan struct{})
