@@ -89,6 +89,8 @@ func TestSigningEventContract(t *testing.T) {
 				require.Equal(t, "test-app", data.App)
 				require.Equal(t, kind, data.Pipeline)
 				require.Equal(t, "accounting-session", data.AuthID)
+				require.Equal(t, state.FeeWei, data.ComputedFee)
+				require.Equal(t, state.FeeUSD, data.ComputedFeeUSD)
 				require.NotEmpty(t, data.RequestID)
 				require.Equal(t, s.key.Address().Hex(), data.PayerAddress)
 				require.Equal(t, state.OrchestratorAddress.Hex(), data.OrchAddress)
@@ -155,18 +157,41 @@ func TestSigningEventContract(t *testing.T) {
 func TestAccountingRateCapturedBeforeAuthorization(t *testing.T) {
 	s, info := testService(t)
 	require.NoError(t, s.pricePolicy.setRate(big.NewRat(3, 1), time.Time{}))
-	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		require.NoError(t, s.pricePolicy.setRate(big.NewRat(6, 1), time.Time{}))
+	var proposal struct{ State paymentState }
+	webhook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&proposal))
+		if s.pricePolicy != nil {
+			require.NoError(t, s.pricePolicy.setRate(big.NewRat(6, 1), time.Time{}))
+		}
 		_, _ = io.WriteString(w, `{"status":200}`)
 	}))
 	defer webhook.Close()
 	require.NoError(t, s.SetAuthWebhook(testURL(t, webhook.URL), nil))
 	s.events = eventSinkFunc(func(_ context.Context, event signingEvent) error {
-		require.Equal(t, "10", event.Data.ComputedFee)
-		require.Equal(t, "3.333333333333333333", *event.Data.ComputedFeeUSD)
+		require.Equal(t, proposal.State.FeeWei, event.Data.ComputedFee)
+		require.Equal(t, proposal.State.FeeUSD, event.Data.ComputedFeeUSD)
 		return nil
 	})
-	require.Equal(t, 200, postPayment(t, s, map[string]any{"type": "fixed", "orchestrator": wire.EncodeOrchestratorInfo(info)}).Code)
+	request := map[string]any{"type": "fixed"}
+	for _, want := range []struct {
+		price int64
+		usd   *string
+	}{{10, new("3.333333333333333333")}, {10, new("1.666666666666666667")}, {5, nil}} {
+		if want.usd == nil {
+			s.pricePolicy = nil
+		}
+		info.Price.PricePerUnit = want.price
+		request["orchestrator"] = wire.EncodeOrchestratorInfo(info)
+		response := postPayment(t, s, request)
+		require.Equal(t, 200, response.Code, response.Body.String())
+		var result paymentResponse
+		require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+		var state paymentState
+		require.NoError(t, json.Unmarshal(result.State.State, &state))
+		require.Equal(t, strconv.FormatInt(want.price, 10), state.FeeWei)
+		require.Equal(t, want.usd, state.FeeUSD)
+		request["state"] = result.State
+	}
 }
 
 func TestRejectedPaymentsEmitNoEvent(t *testing.T) {

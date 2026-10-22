@@ -100,6 +100,7 @@ func TestAuthWebhookFailuresWithholdPayment(t *testing.T) {
 		"/invalid-currency": {`{"status":200,"maxPrice":{"price":10,"currency":"usd","unit":"fixed"}}`, 200, 502},
 		"/invalid-unit":     {`{"status":200,"maxPrice":{"price":10,"currency":"wei","unit":"seconds"}}`, 200, 502},
 		"/price-limit":      {`{"status":200,"maxPrice":{"price":9,"currency":"wei","unit":"fixed"}}`, 200, 481},
+		"/insufficient":     {`{"status":402}`, 200, 402},
 		"/denied":           {`{"status":403}`, 200, 403},
 		"/private-reason":   {`{"status":403,"reason":"Bearer private-webhook-detail: SQL authorization failed"}`, 200, 403},
 		"/private-failure":  {`{"status":502,"reason":"https://auth.internal/?token=private-webhook-detail"}`, 200, 502},

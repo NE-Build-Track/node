@@ -140,6 +140,8 @@ Example request, showing selected state fields:
     "Type": "live",
     "SenderNonce": 7,
     "Balance": "500/1",
+    "FeeWei": "100",
+    "FeeUSD": "0.01",
     "SequenceNumber": 3
   }
 }

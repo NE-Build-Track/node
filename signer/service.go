@@ -442,6 +442,11 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	draft.State.FeeWei, draft.State.FeeUSD = draft.Usage.Fee.FloatString(0), nil
+	if accountingRate != nil && accountingRate.Sign() > 0 {
+		value := new(big.Rat).Quo(draft.Usage.Fee, accountingRate).FloatString(18)
+		draft.State.FeeUSD = new(strings.TrimSuffix(strings.TrimRight(value, "0"), "."))
+	}
 	if err := s.authorizePayment(r, req, info.Price, &draft.State); err != nil {
 		if f, ok := errors.AsType[paymentFailure](err); ok {
 			signerError(w, f.status, f.reason)
@@ -474,7 +479,7 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.events != nil {
-		event := newSignedTicketEvent(s.key.Address(), req, info, draft, accountingRate)
+		event := newSignedTicketEvent(s.key.Address(), req, info, draft)
 		if err := s.events.Enqueue(r.Context(), event); err != nil {
 			if errors.Is(err, errEventTooLarge) {
 				slog.WarnContext(r.Context(), "signer accounting event exceeds size limit; payment withheld", "error", err)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"math/big"
 	"strconv"
-	"strings"
 	"time"
 	"uuid"
 
@@ -51,16 +50,11 @@ type signedTicketEvent struct {
 	AuthID           string    `json:"auth_id"`
 }
 
-func newSignedTicketEvent(payer ethcommon.Address, req paymentRequest, info wire.OrchestratorInfo, draft draftPayment, rate *big.Rat) signingEvent {
+func newSignedTicketEvent(payer ethcommon.Address, req paymentRequest, info wire.OrchestratorInfo, draft draftPayment) signingEvent {
 	state, usage := draft.State, draft.Usage
 	status := "continuing"
 	if state.SequenceNumber == 0 {
 		status = "new"
-	}
-	var feeUSD *string
-	if rate != nil && rate.Sign() > 0 {
-		value := new(big.Rat).Quo(usage.Fee, rate).FloatString(18)
-		feeUSD = new(strings.TrimSuffix(strings.TrimRight(value, "0"), "."))
 	}
 	return signingEvent{
 		ID: uuid.NewV4().String(), Type: "create_signed_ticket", Timestamp: strconv.FormatInt(time.Now().UnixMilli(), 10), Gateway: "",
@@ -69,7 +63,7 @@ func newSignedTicketEvent(payer ethcommon.Address, req paymentRequest, info wire
 			PayerAddress: payer.Hex(), OrchAddress: state.OrchestratorAddress.Hex(), OrchURL: info.Transcoder,
 			ManifestID: state.ManifestID, PMSessionID: state.PMSessionID, CurrentTime: state.LastUpdate.UTC(), CurrentTimeUnix: state.LastUpdate.UnixMilli(),
 			PreviousTime: usage.PreviousTime.UTC(), PreviousTimeUnix: usage.PreviousTime.UnixMilli(), BillableSecs: usage.BillableSecs,
-			SessionBalance: usage.Balance.FloatString(0), ComputedFee: usage.Fee.FloatString(0), ComputedFeeUSD: feeUSD,
+			SessionBalance: usage.Balance.FloatString(0), ComputedFee: state.FeeWei, ComputedFeeUSD: state.FeeUSD,
 			Cost:           new(big.Rat).SetFrac64(info.Price.PricePerUnit, info.Price.UnitsPerPrice).FloatString(10),
 			SequenceNumber: state.SequenceNumber, NumTickets: usage.NumTickets, AuthID: state.AuthID,
 		},

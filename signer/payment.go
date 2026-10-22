@@ -51,6 +51,8 @@ type paymentState struct {
 	AuthMaxPrice         string
 	TicketNonce          uint32 `json:"SenderNonce"`
 	Balance              string
+	FeeWei               string
+	FeeUSD               *string
 	InitialPricePerUnit  int64
 	InitialPixelsPerUnit int64
 	Type                 string
