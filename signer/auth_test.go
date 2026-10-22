@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
 	"github.com/stretchr/testify/require"
 )
@@ -47,6 +49,18 @@ func TestAuthWebhookCachePriceAndIdentity(t *testing.T) {
 	w = postPayment(t, s, req)
 	require.Equal(t, 200, w.Code, w.Body.String())
 	require.Equal(t, int32(1), calls.Load())
+	// Inactive recipients have zero claimable reserve, even with a funded deposit.
+	s.SetPaymentChain(payerChainFunc(func(ctx context.Context, payer, recipient ethcommon.Address) (pm.PayerFunds, error) {
+		require.Equal(t, ethcommon.BytesToAddress(info.TicketParams.Recipient), recipient)
+		funds, err := (fundedPayer{}).PayerFunds(ctx, payer, recipient)
+		funds.Reserve.SetInt64(0)
+		return funds, err
+	}))
+	beforeSignatures := countingKey.calls.Load()
+	requirePaymentFailure(t, postPayment(t, s, req), 400)
+	require.Equal(t, beforeSignatures, countingKey.calls.Load(), "zero claimable reserve must prevent signing despite cached approval")
+	require.Equal(t, int32(1), calls.Load())
+	s.SetPaymentChain(fundedPayer{})
 	state.AuthExpiry = time.Now().Add(-time.Minute).Unix()
 	expired := httptest.NewRequest("POST", "/generate-live-payment", nil)
 	expired.Header.Set("Signer-Auth-Id", "bob")
@@ -59,7 +73,7 @@ func TestAuthWebhookCachePriceAndIdentity(t *testing.T) {
 	r := httptest.NewRequest("POST", "/generate-live-payment", strings.NewReader(string(body)))
 	r.Header.Set("Signer-Auth-Id", "bob")
 	w = httptest.NewRecorder()
-	beforeSignatures := countingKey.calls.Load()
+	beforeSignatures = countingKey.calls.Load()
 	s.ServeHTTP(w, r)
 	require.Equal(t, 403, w.Code)
 	require.Equal(t, beforeSignatures, countingKey.calls.Load(), "cached identity rejection must not sign")
