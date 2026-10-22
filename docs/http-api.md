@@ -187,8 +187,7 @@ example `"X-List: a,b",Authorization: Bearer credential`.
 `AuthToken` 1–3, `TicketExpirationParams` 1–2, `Payment` 1–5, payer params
 1–2, and `SegData` 1, 3, 5 and 8. Other fields are skipped on decode.
 Binary fixtures produced by the pinned Python runner check the wire
-format in `pm/wire/wire_test.go`. Capability payloads and `lv2v` requests
-are rejected.
+format in `pm/wire/wire_test.go`.
 
 ## Lifecycle and response codes
 

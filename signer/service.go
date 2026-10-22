@@ -36,7 +36,6 @@ type paymentRequest struct {
 	App          string    `json:"app,omitempty"`
 	Type         string    `json:"type"`
 	MaxPrice     *maxPrice `json:"maxPrice,omitempty"`
-	Capabilities []byte    `json:"capabilities,omitempty"`
 }
 type paymentResponse struct {
 	Payment  string      `json:"payment"`
@@ -353,10 +352,6 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Type != "live" && req.Type != "fixed" {
 		signerError(w, 400, "payment type must be live or fixed")
-		return
-	}
-	if len(req.Capabilities) > 0 {
-		signerError(w, 400, "payment capabilities are unsupported")
 		return
 	}
 	info, err := wire.DecodeOrchestratorInfo(req.Orchestrator)
