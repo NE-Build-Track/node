@@ -36,7 +36,7 @@ jobs:
       - name: Pin Python Live Runner SDK fixture
         run: |
           git clone https://github.com/livepeer/livepeer-python-gateway.git "$PYTHON_RUNNER_SDK_DIR"
-          git -C "$PYTHON_RUNNER_SDK_DIR" checkout --detach 44df06157fcdb864e37d971e8caba86b2a7dc92e
+          git -C "$PYTHON_RUNNER_SDK_DIR" checkout --detach 76a1a1c58656ef2ad0c28542ea5f99086b76db69
           uv sync --project "$PYTHON_RUNNER_SDK_DIR" --locked --no-dev --extra examples --python 3.12
       - name: Race and real-process tests
         run: |

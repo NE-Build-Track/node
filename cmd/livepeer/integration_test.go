@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -178,48 +179,9 @@ func TestRealBinaryOffchainFlow(t *testing.T) {
 
 func checkPythonSDK(t *testing.T, root, serviceURL, runnerURL string) {
 	t.Helper()
-	sdkDir := os.Getenv("PYTHON_RUNNER_SDK_DIR")
-	if sdkDir == "" {
-		sdkDir = filepath.Join(root, "..", "python-runner")
-	}
-	if _, err := os.Stat(filepath.Join(sdkDir, "pyproject.toml")); err != nil {
-		if os.Getenv("PYTHON_RUNNER_SDK_DIR") != "" {
-			t.Fatalf("configured Python SDK checkout unavailable: %v", err)
-		}
-		t.Log("Python runner SDK checkout unavailable; skipped SDK fixture")
-		return
-	}
-	python := os.Getenv("PYTHON_RUNNER_PYTHON")
+	python, export := test.PythonSDK(t, root)
 	if python == "" {
-		python = filepath.Join(sdkDir, ".venv", "bin", "python")
-	}
-	if _, err := os.Stat(python); err != nil {
-		if os.Getenv("PYTHON_RUNNER_PYTHON") != "" {
-			t.Fatalf("configured Python SDK interpreter unavailable: %v", err)
-		}
-		t.Log("Python runner SDK interpreter unavailable; skipped SDK fixture")
 		return
-	}
-	revision, err := exec.Command("git", "-C", sdkDir, "rev-parse", "HEAD").Output()
-	require.NoError(t, err)
-	require.Equal(t, "44df06157fcdb864e37d971e8caba86b2a7dc92e", strings.TrimSpace(string(revision)))
-	t.Attr("python_sdk_revision", strings.TrimSpace(string(revision)))
-	// By default export the committed tree: a developer checkout can have local
-	// experiments without changing the compatibility fixture under test.
-	export := t.TempDir()
-	archive := exec.Command("git", "-C", sdkDir, "archive", "HEAD")
-	tar := exec.Command("tar", "-xf", "-", "-C", export)
-	pipe, err := archive.StdoutPipe()
-	require.NoError(t, err)
-	tar.Stdin = pipe
-	require.NoError(t, tar.Start())
-	require.NoError(t, archive.Run())
-	require.NoError(t, tar.Wait())
-	if os.Getenv("PYTHON_RUNNER_USE_WORKING_TREE") == "1" {
-		export = sdkDir
-		t.Attr("python_sdk_tree", "working-copy")
-	} else {
-		t.Attr("python_sdk_tree", "committed")
 	}
 	fixture := filepath.Join(root, "cmd", "livepeer", "testdata", "python_sdk_compat.py")
 	run := exec.Command(python, fixture, serviceURL, runnerURL, "exact-bootstrap")

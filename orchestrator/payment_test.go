@@ -24,6 +24,7 @@ import (
 	"github.com/livepeer/node/eth"
 	"github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/pm"
+	"github.com/livepeer/node/pm/wire"
 	"github.com/livepeer/node/signer"
 	"github.com/stretchr/testify/require"
 )
@@ -223,39 +224,10 @@ func pinnedPythonSDK(t *testing.T) (python, export, root string) {
 	_, testFile, _, ok := runtime.Caller(0)
 	require.True(t, ok)
 	root = filepath.Clean(filepath.Join(filepath.Dir(testFile), ".."))
-	sdkDir := filepath.Join(root, "..", "python-runner")
-	if configured := os.Getenv("PYTHON_RUNNER_SDK_DIR"); configured != "" {
-		sdkDir = configured
-	}
-	python = os.Getenv("PYTHON_RUNNER_PYTHON")
+	python, export = test.PythonSDK(t, root)
 	if python == "" {
-		python = filepath.Join(sdkDir, ".venv", "bin", "python")
-	}
-	if _, err := os.Stat(python); err != nil {
-		if os.Getenv("PYTHON_RUNNER_PYTHON") != "" || os.Getenv("PYTHON_RUNNER_SDK_DIR") != "" {
-			t.Fatalf("configured pinned Python runner interpreter unavailable: %v", err)
-		}
 		t.Skip("pinned Python runner interpreter unavailable")
 	}
-	revision, err := exec.Command("git", "-C", sdkDir, "rev-parse", "HEAD").Output()
-	require.NoError(t, err)
-	require.Equal(t, "44df06157fcdb864e37d971e8caba86b2a7dc92e", strings.TrimSpace(string(revision)))
-	t.Attr("python_sdk_revision", strings.TrimSpace(string(revision)))
-	t.Setenv("PYTHONDONTWRITEBYTECODE", "1")
-	if os.Getenv("PYTHON_RUNNER_USE_WORKING_TREE") == "1" {
-		t.Attr("python_sdk_tree", "working-copy")
-		return python, sdkDir, root
-	}
-	t.Attr("python_sdk_tree", "committed")
-	export = t.TempDir()
-	archive := exec.Command("git", "-C", sdkDir, "archive", "HEAD")
-	tar := exec.Command("tar", "-xf", "-", "-C", export)
-	pipe, err := archive.StdoutPipe()
-	require.NoError(t, err)
-	tar.Stdin = pipe
-	require.NoError(t, tar.Start())
-	require.NoError(t, archive.Run())
-	require.NoError(t, tar.Wait())
 	return
 }
 
@@ -296,6 +268,16 @@ func TestPinnedPythonSustainedPaymentRefresh(t *testing.T) {
 	app.SetPayment(engine)
 	var refreshes atomic.Int32
 	orch := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/test/expire-auth" {
+			// The SDK treats payment parameters as opaque bytes.
+			data, err := io.ReadAll(r.Body)
+			require.NoError(t, err)
+			info, err := wire.DecodeOrchestratorInfo(data)
+			require.NoError(t, err)
+			info.Auth.Expiration = time.Now().Add(-time.Minute).Unix()
+			_, _ = w.Write(wire.EncodeOrchestratorInfo(info))
+			return
+		}
 		if r.URL.Path == "/test/advance" {
 			chain.block.Add(40)
 			w.WriteHeader(200)

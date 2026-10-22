@@ -4,11 +4,9 @@ import asyncio
 import base64
 import json
 import sys
-import time
 from dataclasses import replace
 
 import aiohttp
-from livepeer_gateway import lp_rpc_pb2
 from livepeer_gateway.remote_signer import LivePaymentChallenge, LivePaymentSession, get_signer_info
 
 
@@ -59,13 +57,15 @@ async def main(orchestrator: str, signer: str) -> None:
         assert expired["PMSessionID"] != rolled["PMSessionID"], expired
         assert expired["SequenceNumber"] == 46
 
-        info = lp_rpc_pb2.OrchestratorInfo()
-        info.ParseFromString(base64.b64decode(session._challenge.payment_params))
-        info.auth_token.expiration = int(time.time()) - 1
-        session._challenge = replace(
-            session._challenge,
-            payment_params=base64.b64encode(info.SerializeToString()).decode(),
-        )
+        async with http.post(
+            f"{orchestrator}/test/expire-auth",
+            data=base64.b64decode(session._challenge.payment_params),
+        ) as response:
+            assert response.status == 200, await response.text()
+            session._challenge = replace(
+                session._challenge,
+                payment_params=base64.b64encode(await response.read()).decode(),
+            )
         await session.send_payment()
         renewed = state()
         assert renewed["PMSessionID"] != expired["PMSessionID"], renewed
