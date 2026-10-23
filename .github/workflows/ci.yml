@@ -20,6 +20,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            echo "$unformatted"
+            echo 'Run go fmt ./... to fix formatting.' >&2
+            exit 1
+          fi
       - name: SDK fixture paths
         run: |
           {
