@@ -1,6 +1,6 @@
 # Development
 
-The module requires Go 1.27.2 or newer. Build all four executables with:
+The module requires Go 1.27.3 or newer. Build all four executables with:
 
 ```sh
 make build

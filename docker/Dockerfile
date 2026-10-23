@@ -1,10 +1,10 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.2@sha256:5bc7f572bbaa98885a3a1fd9c0aa76b59e3e14e8628bfc316bbfd0c701e4818c AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3@sha256:f20d83a83e18dbd2a4714b8ffd4b30b287b6243962dd75608e86abcc63ba4efc AS build
 ENV CGO_ENABLED=0 GOTOOLCHAIN=local GOENV=off GOWORK=off \
     GOFLAGS=-mod=readonly GOAMD64=v1 GOARM64=v8.0
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN sha256sum go.mod go.sum > /tmp/modules.sha256 && \
-    test "$(go env GOVERSION)" = go1.27.2 && go mod download && go mod verify && \
+    test "$(go env GOVERSION)" = go1.27.3 && go mod download && go mod verify && \
     sha256sum -c /tmp/modules.sha256
 COPY . .
 ARG TARGETOS

@@ -111,7 +111,7 @@ jobs:
           mkdir -p dist "$RUNNER_TEMP/package/$BUNDLE/bin"
           cp "$RUNNER_TEMP/bin/"* "$RUNNER_TEMP/package/$BUNDLE/bin/"
           cp LICENSE "$RUNNER_TEMP/package/$BUNDLE/"
-          printf 'version=%s\ncommit=%s\ngo=go1.27.2\nos=linux\narch=%s\n' \
+          printf 'version=%s\ncommit=%s\ngo=go1.27.3\nos=linux\narch=%s\n' \
             "$RELEASE_VERSION" "$RELEASE_COMMIT" "$ARCH" > "$RUNNER_TEMP/package/$BUNDLE/VERSION"
           (
             cd "$RUNNER_TEMP/package/$BUNDLE"
