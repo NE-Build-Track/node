@@ -46,7 +46,7 @@ jobs:
       ARCH: ${{ matrix.arch }}
       BUILD_RELEASE: ${{ github.event_name != 'push' || github.ref_type == 'tag' }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
@@ -164,7 +164,7 @@ jobs:
         run: sh .github/scripts/docker-smoke.sh "$IMAGE" "$IMAGE_VERSION" "$IMAGE_COMMIT"
       - name: Save tested release bundle
         if: env.BUILD_RELEASE == 'true'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/*
@@ -177,7 +177,7 @@ jobs:
         run: docker save --output "$RUNNER_TEMP/docker-$ARCH.tar" "$IMAGE"
       - name: Save tested image
         if: github.event_name == 'push'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: docker-linux-${{ matrix.arch }}
           path: ${{ runner.temp }}/docker-${{ matrix.arch }}.tar
@@ -193,7 +193,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-linux-*
           path: dist
