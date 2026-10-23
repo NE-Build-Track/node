@@ -193,21 +193,10 @@ func checkPythonSDK(t *testing.T, root, serviceURL, runnerURL string) {
 
 func checkGoSDK(t *testing.T, root, serviceURL, runnerURL string) {
 	t.Helper()
-	sdkDir := os.Getenv("GO_RUNNER_SDK_DIR")
+	sdkDir := test.GoSDK(t, root)
 	if sdkDir == "" {
-		sdkDir = filepath.Join(root, "..", "golang-runner")
-	}
-	if _, err := os.Stat(filepath.Join(sdkDir, "go.mod")); err != nil {
-		t.Log("Go runner SDK checkout unavailable; skipped SDK fixture")
 		return
 	}
-	revision, err := exec.Command("git", "-C", sdkDir, "rev-parse", "HEAD").Output()
-	require.NoError(t, err)
-	require.Equal(t, "c3be5a14a91f8a3437133419becaced324d804fe", strings.TrimSpace(string(revision)))
-	t.Attr("go_sdk_revision", strings.TrimSpace(string(revision)))
-	status, err := exec.Command("git", "-C", sdkDir, "status", "--porcelain").Output()
-	require.NoError(t, err)
-	require.Empty(t, status, "SDK checkout must be clean for compatibility result")
 	dir := t.TempDir()
 	goMod := "module sdkcompat\n\ngo 1.27.2\n\nrequire github.com/livepeer/golang-runner v0.0.0\n\nreplace github.com/livepeer/golang-runner => " + sdkDir + "\n"
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0600))

@@ -10,6 +10,27 @@ import (
 )
 
 const pythonSDKRevision = "76a1a1c58656ef2ad0c28542ea5f99086b76db69"
+const goSDKRevision = "c3be5a14a91f8a3437133419becaced324d804fe"
+
+// GoSDK exports the pinned SDK without changing the developer's checkout.
+// It returns an empty path when an unconfigured checkout is absent.
+func GoSDK(t *testing.T, root string) string {
+	t.Helper()
+	sdkDir := os.Getenv("GO_RUNNER_SDK_DIR")
+	if sdkDir == "" {
+		sdkDir = filepath.Join(root, "..", "golang-runner")
+	}
+	if _, err := os.Stat(filepath.Join(sdkDir, "go.mod")); err != nil {
+		if os.Getenv("GO_RUNNER_SDK_DIR") != "" {
+			t.Fatalf("configured Go SDK fixture unavailable: %v", err)
+		}
+		t.Log("Go runner SDK checkout unavailable; skipped SDK fixture")
+		return ""
+	}
+	t.Attr("go_sdk_revision", goSDKRevision)
+	t.Attr("go_sdk_tree", "committed")
+	return exportRevision(t, sdkDir, "https://github.com/livepeer/golang-runner.git", goSDKRevision)
+}
 
 // PythonSDK exports the pinned SDK without changing the developer's checkout.
 // It returns empty paths when an unconfigured checkout or interpreter is absent.
@@ -47,7 +68,7 @@ func exportRevision(t *testing.T, sdkDir, remote, revision string) string {
 		output, err := exec.Command("git", "init", "--bare", sdkDir).CombinedOutput()
 		require.NoError(t, err, string(output))
 		output, err = exec.Command("git", "-C", sdkDir, "fetch", "--depth=1", remote, revision).CombinedOutput()
-		require.NoError(t, err, "fetch pinned Python SDK %s: %s", revision, output)
+		require.NoError(t, err, "fetch pinned SDK %s: %s", revision, output)
 	}
 	export := t.TempDir()
 	archive := exec.Command("git", "-C", sdkDir, "archive", revision)

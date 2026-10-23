@@ -47,10 +47,9 @@ Integration tests use these pinned revisions:
 | Go: `livepeer/golang-runner` | `c3be5a14a91f8a3437133419becaced324d804fe` | `GO_RUNNER_SDK_DIR` |
 | Python: `livepeer/livepeer-python-gateway` | `76a1a1c58656ef2ad0c28542ea5f99086b76db69` | `PYTHON_RUNNER_SDK_DIR` |
 
-Use a clean Go checkout at its pinned revision. Python tests always export the
-pinned revision, regardless of the checkout's branch or local edits, and fetch
-it into a temporary repository if it is missing locally. To provision fixtures in
-a temporary directory (requires Git, Python 3.12, and `uv`):
+SDK tests always export the pinned revision, regardless of the checkout's branch
+or local edits, and fetch it into a temporary repository if it is missing locally.
+To provision fixtures in a temporary directory (requires Git, Python 3.12, and `uv`):
 
 ```sh
 livepeer_fixture_dir=$(mktemp -d)
@@ -68,9 +67,8 @@ go test -race ./...
 Without explicit paths, tests look for sibling `golang-runner` and
 `python-runner` checkouts and the Python checkout's `.venv/bin/python`. SDK
 coverage can be skipped when the checkouts or dependencies are absent, so read
-the test logs before reporting a compatibility result. All Python fixtures use
-the committed tree at `76a1a1c58656ef2ad0c28542ea5f99086b76db69`; the development
-checkout is left unchanged.
+the test logs before reporting a compatibility result. Both SDK fixtures use
+their pinned committed trees; development checkouts are left unchanged.
 
 The fixtures cover persistent and single-shot sessions, proxy modes, discovery,
 runner callbacks, Trickle, and Python media/control round trips. Payment tests
