@@ -18,6 +18,7 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/node/destination"
+	discovery "github.com/livepeer/node/discovery/shared"
 	"github.com/livepeer/node/eth"
 	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
@@ -70,16 +71,6 @@ func (s *Service) SetPayerPolicy(policy pm.PayerPolicy) error {
 	return nil
 }
 
-func validateDiscoveryURL(endpoint *url.URL) error {
-	if err := destination.ValidateURL(endpoint); err != nil {
-		return errors.New("invalid signer discovery orchestrator URL")
-	}
-	if endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
-		return errors.New("invalid signer discovery orchestrator URL")
-	}
-	return nil
-}
-
 // SetDiscovery configures discovery sources. Private destinations, including
 // redirect targets, require a discovery grant. Configure before starting workers
 // or serving requests.
@@ -90,11 +81,12 @@ func (s *Service) SetDiscovery(orchestrators []*url.URL, grants ...string) error
 	}
 	urls := make([]*url.URL, 0, len(orchestrators))
 	for _, candidate := range orchestrators {
-		if err := validateDiscoveryURL(candidate); err != nil {
+		if err := discovery.ValidateURL(candidate); err != nil {
 			return err
 		}
 		parsed := candidate.Clone()
-		parsed.Path = strings.TrimRight(parsed.Path, "/") + "/discovery"
+		parsed.RawPath = strings.TrimRight(parsed.EscapedPath(), "/") + "/discovery"
+		parsed.Path, _ = url.PathUnescape(parsed.RawPath)
 		urls = append(urls, parsed)
 	}
 	client := policy.Client()
@@ -196,6 +188,7 @@ type discoveredGPU struct {
 }
 
 type discoveredRunner struct {
+	ObservedAt        string         `json:"observed_at"`
 	URL               string         `json:"url"`
 	App               string         `json:"app"`
 	Version           string         `json:"version,omitempty"`
@@ -212,6 +205,11 @@ type discoveredRunner struct {
 		Unit     string      `json:"unit"`
 	} `json:"price_info"`
 }
+
+func (r discoveredRunner) DiscoveryIdentity() (string, string, string) {
+	return r.URL, r.App, r.ObservedAt
+}
+
 type discoveredOrchestrator struct {
 	Address  string             `json:"address"`
 	Runners  []discoveredRunner `json:"runners"`
@@ -228,18 +226,10 @@ func (s *Service) discover(w http.ResponseWriter, r *http.Request) {
 	appFilter := r.URL.Query()["app"]
 	gpuFilter := r.URL.Query()["gpu"]
 	available := false
-	result := make([]discoveredOrchestrator, 0, len(sources))
+	inventories := make([]discovery.Entry[discoveredRunner], 0, len(sources))
+	observations := make(map[string]time.Time)
 	for source, endpoint := range sources {
-		u := *endpoint
-		query := u.Query()
-		for _, app := range appFilter {
-			query.Add("app", app)
-		}
-		for _, gpu := range gpuFilter {
-			query.Add("gpu", gpu)
-		}
-		u.RawQuery = query.Encode()
-		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, u.String(), nil)
+		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint.String(), nil)
 		if err != nil {
 			slog.ErrorContext(r.Context(), "signer discovery request construction failed", "source_index", source, "error", err)
 			continue
@@ -254,49 +244,47 @@ func (s *Service) discover(w http.ResponseWriter, r *http.Request) {
 			_ = response.Body.Close()
 			continue
 		}
-		var entries []struct {
-			Address string             `json:"address"`
-			Runners []discoveredRunner `json:"runners"`
-		}
-		decodeErr := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&entries)
+		data, decodeErr := discovery.Read(response.Body)
 		_ = response.Body.Close()
 		if decodeErr != nil {
-			slog.WarnContext(r.Context(), "signer discovery response decoding failed", "source_index", source, "error", decodeErr)
+			slog.WarnContext(r.Context(), "signer discovery response read failed", "source_index", source, "error", decodeErr)
+			continue
+		}
+		observed := time.Now().UTC()
+		entries, decodeErr := discovery.Decode[discoveredRunner](data, observed)
+		if decodeErr != nil {
+			slog.WarnContext(r.Context(), "signer discovery response invalid", "source_index", source, "error", decodeErr)
 			continue
 		}
 		available = true
 		for _, entry := range entries {
-			if _, err := destination.ParseURL(entry.Address); err != nil {
-				continue
-			}
-			filtered := make([]discoveredRunner, 0, len(entry.Runners))
-			for _, runner := range entry.Runners {
-				if runner.URL == "" || runner.App == "" {
-					continue
-				}
-				if len(appFilter) > 0 {
-					match := slices.Contains(appFilter, runner.App)
-					if !match {
-						continue
-					}
-				}
-				if len(gpuFilter) > 0 {
-					name := ""
-					if runner.GPU != nil {
-						name = strings.TrimSpace(runner.GPU.Name)
-					}
-					match := slices.Contains(gpuFilter, name)
-					if !match {
-						continue
-					}
-				}
-				filtered = append(filtered, runner)
-			}
-			if len(filtered) > 0 {
-				result = append(result, discoveredOrchestrator{Address: entry.Address, Runners: filtered, LastSeen: time.Now().UTC()})
+			if _, exists := observations[entry.Address]; !exists {
+				observations[entry.Address] = observed
 			}
 		}
+		inventories = append(inventories, entries...)
 	}
+	result := make([]discoveredOrchestrator, 0)
+	for _, entry := range discovery.Merge(inventories) {
+		filtered := make([]discoveredRunner, 0, len(entry.Runners))
+		for _, runner := range entry.Runners {
+			if len(appFilter) > 0 && !slices.Contains(appFilter, runner.App) {
+				continue
+			}
+			name := ""
+			if runner.GPU != nil {
+				name = strings.TrimSpace(runner.GPU.Name)
+			}
+			if len(gpuFilter) > 0 && !slices.Contains(gpuFilter, name) {
+				continue
+			}
+			filtered = append(filtered, runner)
+		}
+		if len(filtered) > 0 {
+			result = append(result, discoveredOrchestrator{Address: entry.Address, Runners: filtered, LastSeen: observations[entry.Address]})
+		}
+	}
+
 	if !available {
 		signerError(w, http.StatusServiceUnavailable, "orchestrator discovery unavailable")
 		return

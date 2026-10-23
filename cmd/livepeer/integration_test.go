@@ -39,7 +39,7 @@ func TestRealBinaryOffchainFlow(t *testing.T) {
 	require.True(t, ok)
 	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../.."))
 	install := t.TempDir()
-	for _, name := range []string{"livepeer", "livepeer-orchestrator", "livepeer-signer", "livepeer-chain"} {
+	for _, name := range []string{"livepeer", "livepeer-orchestrator", "livepeer-signer", "livepeer-chain", "livepeer-discovery"} {
 		build := exec.Command("go", "build", "-o", filepath.Join(install, name), "./cmd/"+name)
 		build.Dir = root
 		output, err := build.CombinedOutput()
@@ -55,7 +55,7 @@ func TestRealBinaryOffchainFlow(t *testing.T) {
 	completion, err := exec.Command(dispatcher, "completion", "orchestrator", "bash").CombinedOutput()
 	require.NoError(t, err, string(completion))
 	require.Contains(t, string(completion), "bash completion")
-	for _, component := range []string{"orchestrator", "signer", "chain"} {
+	for _, component := range []string{"orchestrator", "signer", "chain", "discovery"} {
 		direct := filepath.Join(install, "livepeer-"+component)
 		for _, arguments := range [][]string{{"--help"}, {"completion", "bash"}, {"completion", "zsh"}, {"completion", "fish"}, {"completion", "powershell"}} {
 			actual, err := exec.Command(direct, arguments...).CombinedOutput()
@@ -165,6 +165,7 @@ func TestRealBinaryOffchainFlow(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "from-runner", string(data))
 	require.NoError(t, response.Body.Close())
+	testDiscoveryBinary(t, install, serviceURL)
 	checkGoSDK(t, root, serviceURL, runner.URL)
 	checkPythonSDK(t, root, serviceURL, runner.URL)
 	require.NoError(t, cmd.Process.Signal(syscall.SIGTERM))
@@ -175,6 +176,61 @@ func TestRealBinaryOffchainFlow(t *testing.T) {
 		t.Fatal("orchestrator did not shut down")
 	}
 	cmd.Process = nil
+}
+
+func testDiscoveryBinary(t *testing.T, install, orchestratorURL string) {
+	t.Helper()
+	listen := fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	metrics := fmt.Sprintf("http://127.0.0.1:%d", freePort(t))
+	baseURL := "http://" + listen
+	logFile, err := os.Create(filepath.Join(t.TempDir(), "discovery.log"))
+	require.NoError(t, err)
+	defer logFile.Close()
+	cmd := exec.Command(filepath.Join(install, "livepeer"), "discovery", "--config=", "--listen", listen,
+		"--metrics-listen", strings.TrimPrefix(metrics, "http://"),
+		"--nodes", orchestratorURL, "--grants", strings.TrimPrefix(orchestratorURL, "http://"))
+	cmd.Stdout, cmd.Stderr = logFile, logFile
+	require.NoError(t, cmd.Start())
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	defer func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+			t.Error("discovery did not shut down")
+		}
+	}()
+	client := &http.Client{Timeout: time.Second}
+	require.Eventually(t, func() bool {
+		response, err := client.Get(metrics + "/readyz")
+		if err != nil {
+			return false
+		}
+		defer response.Body.Close()
+		return response.StatusCode == 200
+	}, 5*time.Second, 20*time.Millisecond)
+	require.Eventually(t, func() bool {
+		response, err := client.Get(baseURL + "/discovery")
+		if err != nil {
+			return false
+		}
+		defer response.Body.Close()
+		var entries []struct {
+			Address string `json:"address"`
+			Runners []struct {
+				URL string `json:"url"`
+			} `json:"runners"`
+		}
+		if json.NewDecoder(response.Body).Decode(&entries) != nil || len(entries) != 2 {
+			return false
+		}
+		return entries[0].Address == "" && entries[1].Address == orchestratorURL && len(entries[1].Runners) > 0 &&
+			strings.HasPrefix(entries[1].Runners[0].URL, orchestratorURL+"/apps/")
+	}, 5*time.Second, 20*time.Millisecond)
 }
 
 func checkPythonSDK(t *testing.T, root, serviceURL, runnerURL string) {

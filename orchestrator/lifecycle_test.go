@@ -186,6 +186,7 @@ func TestRegistryTeardownCancelsSessions(t *testing.T) {
 				require.NoError(t, err)
 				ctx, ok := registry.sessionContext(registered.RunnerID, sid)
 				require.True(t, ok)
+				require.Len(t, registry.Discovery()[0].Runners, 1)
 				switch reason {
 				case "release":
 					registry.ReleaseBySession(sid)
@@ -199,6 +200,9 @@ func TestRegistryTeardownCancelsSessions(t *testing.T) {
 					registry.Close()
 				}
 				require.ErrorIs(t, ctx.Err(), context.Canceled)
+				if reason != "release" {
+					require.Empty(t, registry.Discovery()[0].Runners)
+				}
 			})
 		})
 	}

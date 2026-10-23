@@ -38,6 +38,9 @@ Discovery at `GET /discovery` lists available runners. Off-chain operation
 accepts quoted runner prices but advertises free service. Enable the payment
 settings below to charge clients.
 
+The orchestrator advertises its own runners. Multiple orchestrators can
+be aggregated with a standalone [discovery service](discovery.md).
+
 ## Allow local and private destinations
 
 Runner forwarding, callback-created session proxies, and static health checks

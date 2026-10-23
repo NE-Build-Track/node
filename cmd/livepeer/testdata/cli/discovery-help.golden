@@ -1,0 +1,20 @@
+Standalone orchestrator discovery
+
+Usage:
+  livepeer-discovery [flags]
+
+Flags:
+  -c, --config string               Configuration file; empty disables config discovery (env: LIVEPEER_DISCOVERY_CONFIG) (default "config.toml")
+  -n, --network string              Network name (custom networks require explicit chain settings) (env: LIVEPEER_DISCOVERY_NETWORK) (default "offchain")
+  -d, --data-dir string             Component data directory; defaults to ~/.lpData/<network>/<component> (env: LIVEPEER_DISCOVERY_DATA_DIR) (default "$HOME/.lpData/offchain/discovery")
+  -l, --listen string               Public HTTP listener (env: LIVEPEER_DISCOVERY_LISTEN) (default "127.0.0.1:8939")
+  -m, --metrics-listen string       Loopback metrics listener (env: LIVEPEER_DISCOVERY_METRICS_LISTEN) (default "127.0.0.1:8940")
+      --nodes strings               Orchestrator or discovery node base URLs (env: LIVEPEER_DISCOVERY_NODES)
+  -a, --advertise-nodes             Advertise available discovery nodes (env: LIVEPEER_DISCOVERY_ADVERTISE_NODES) (default true)
+      --advertise-runners           Advertise collected runners (env: LIVEPEER_DISCOVERY_ADVERTISE_RUNNERS) (default true)
+  -r, --refresh-interval duration   Discovery inventory refresh interval (env: LIVEPEER_DISCOVERY_REFRESH_INTERVAL) (default 5m0s)
+      --max-failed-refreshes int    Consecutive failed refreshes before eviction (env: LIVEPEER_DISCOVERY_MAX_FAILED_REFRESHES) (default 6)
+  -g, --grants strings              Private discovery IP[:port] or CIDR grants (env: LIVEPEER_DISCOVERY_GRANTS)
+  -p, --print-config                Print TOML configuration
+  -h, --help                        help for livepeer-discovery
+  -v, --version                     version for livepeer-discovery

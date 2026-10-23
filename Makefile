@@ -12,6 +12,7 @@ build:
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/livepeer-orchestrator ./cmd/livepeer-orchestrator
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/livepeer-signer ./cmd/livepeer-signer
 	$(GO) build -ldflags '$(LDFLAGS)' -o bin/livepeer-chain ./cmd/livepeer-chain
+	$(GO) build -ldflags '$(LDFLAGS)' -o bin/livepeer-discovery ./cmd/livepeer-discovery
 
 test:
 	$(GO) test -race ./...

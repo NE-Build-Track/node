@@ -8,14 +8,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/livepeer/node/destination"
+	discovery "github.com/livepeer/node/discovery/shared"
 	"github.com/livepeer/node/pm"
 )
 
@@ -381,6 +384,7 @@ func (r *Registry) Unregister(id, auth string) (int, error) {
 }
 
 type discoveryRunner struct {
+	ObservedAt        string     `json:"observed_at"`
 	URL               string     `json:"url"`
 	App               string     `json:"app"`
 	Version           string     `json:"version,omitempty"`
@@ -393,21 +397,24 @@ type discoveryRunner struct {
 	PriceInfo         priceInfo  `json:"price_info,omitzero"`
 }
 
-type discoveryEntry struct {
-	Address string            `json:"address"`
-	Runners []discoveryRunner `json:"runners"`
+func (r discoveryRunner) DiscoveryIdentity() (string, string, string) {
+	return r.URL, r.App, r.ObservedAt
 }
+
+type discoveryEntry = discovery.Entry[discoveryRunner]
 
 func (r *Registry) Discovery() []discoveryEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	result := []discoveryRunner{}
-	for id, item := range r.runners {
+	observed := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, id := range slices.Sorted(maps.Keys(r.runners)) {
+		item := r.runners[id]
 		if !r.usable(item) || !r.priceAvailable(item) {
 			continue
 		}
 		available := max(0, item.Capacity-len(item.Sessions))
-		result = append(result, discoveryRunner{URL: r.discoveryURL(id, item), App: item.App, Version: item.Version, Metadata: item.Metadata, GPU: item.GPU, Mode: item.Mode, Capacity: item.Capacity, CapacityUsed: len(item.Sessions), CapacityAvailable: available, PriceInfo: item.PriceInfo})
+		result = append(result, discoveryRunner{ObservedAt: observed, URL: r.discoveryURL(id, item), App: item.App, Version: item.Version, Metadata: item.Metadata, GPU: item.GPU, Mode: item.Mode, Capacity: item.Capacity, CapacityUsed: len(item.Sessions), CapacityAvailable: available, PriceInfo: item.PriceInfo})
 	}
 	return []discoveryEntry{{Address: r.service, Runners: result}}
 }

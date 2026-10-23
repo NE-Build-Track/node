@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/livepeer/node/destination"
+	discovery "github.com/livepeer/node/discovery/shared"
 	"github.com/livepeer/node/trickle"
 )
 
@@ -131,10 +132,14 @@ func (s *Server) Close() {
 	s.proxyTransport.CloseIdleConnections()
 }
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
+func writeJSON(w http.ResponseWriter, status int, value any) (int, error) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
+	body, err := json.Marshal(value)
+	if err != nil {
+		return 0, err
+	}
+	return w.Write(append(body, '\n'))
 }
 
 func fail(w http.ResponseWriter, status int, message string) {
@@ -231,8 +236,10 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
 
-func (s *Server) discovery(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, s.registry.Discovery())
+func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
+	if n, _ := writeJSON(w, http.StatusOK, s.registry.Discovery()); n > discovery.MaxBody {
+		s.logger.WarnContext(r.Context(), "orchestrator discovery response exceeds signer size limit", "response_bytes", n, "max_bytes", discovery.MaxBody)
+	}
 }
 
 func (s *Server) reserve(w http.ResponseWriter, r *http.Request) {

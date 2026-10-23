@@ -79,15 +79,16 @@ Discovery helps a client choose where to send work. A client can ask which
 orchestrators have runners for a particular application or GPU, inspect their
 advertised prices and capacity, and use a returned runner URL to start work.
 
-Set `Orchestrators` to the base URLs to query. Local or private sources also
-need [destination grants](configuration.md#destination-grants). For example:
+Set `Orchestrators` to orchestrator or standalone [discovery](discovery.md)
+base URLs to query. Both expose the same inventory API. Local or private sources
+also need [destination grants](configuration.md#destination-grants). For example:
 
 ```toml
 Orchestrators = ["http://127.0.0.1:8935"]
 DiscoveryGrants = ["127.0.0.1:8935"]
 ```
 
-The signer queries each orchestrator's `/discovery` endpoint when a client
+The signer queries each configured source's `/discovery` endpoint when a client
 calls `GET /discover-orchestrators`.
 
 Query the signer to find runners:

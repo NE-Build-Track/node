@@ -90,7 +90,7 @@ jobs:
           cache-from: type=gha,scope=docker-${{ matrix.arch }}
       - name: Verify static binaries
         run: |
-          for binary in livepeer livepeer-orchestrator livepeer-signer livepeer-chain; do
+          for binary in livepeer livepeer-orchestrator livepeer-signer livepeer-chain livepeer-discovery; do
             path="$RUNNER_TEMP/bin/$binary"
             # A static ELF must have neither an interpreter nor shared-library dependencies.
             readelf --program-headers "$path" > "$RUNNER_TEMP/program-headers"

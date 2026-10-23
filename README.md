@@ -1,14 +1,15 @@
 # Livepeer Node
 
 Livepeer Node contains services and command-line tools for the Livepeer network.
-It includes an orchestrator for Livepeer runners, a remote signer for network
-payments and orchestrator discovery, and a protocol CLI for managing wallets,
-staking, earnings, funding, governance, and local signing.
+It includes an orchestrator for Livepeer runners, standalone discovery,
+a remote signer for network payments and discovery filtering, and a protocol CLI
+for managing wallets, staking, earnings, funding, governance, and local signing.
 
 | Executable | Role |
 | --- | --- |
 | `livepeer` | Runs the bundled component commands. |
 | `livepeer-orchestrator` | Registers runners, reserves sessions, proxies traffic, and redeems payment tickets. |
+| `livepeer-discovery` | Collects and caches orchestrator runner inventories without running an orchestrator. |
 | `livepeer-signer` | Signs identities and payments, discovers orchestrators, and optionally publishes accounting events. |
 | `livepeer-chain` | Inspects accounts and contracts, manages wallets, staking, earnings, funds, and governance, and signs files locally. |
 
@@ -67,6 +68,7 @@ component guides:
 
 - [Orchestrator](docs/orchestrator.md): dynamic/static runners, networking, TLS,
   proxy URLs, limits, and payments.
+- [Discovery](docs/discovery.md): standalone inventory collection, caching, and peer advertising.
 - [Signer](docs/signer.md): chain access, price limits, authorization, and Kafka
   accounting.
 - [Chain commands](docs/chain.md): inspecting accounts, previewing and submitting

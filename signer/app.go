@@ -20,6 +20,7 @@ import (
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/node/cmd/version"
 	"github.com/livepeer/node/destination"
+	discovery "github.com/livepeer/node/discovery/shared"
 	"github.com/livepeer/node/eth"
 	"github.com/livepeer/node/nodeconfig"
 	"github.com/livepeer/node/nodeconfig/migrations"
@@ -132,7 +133,7 @@ func (p Params) Validate() error {
 		return errors.New("--eth-usd-feed requires positive --eth-usd-max-age")
 	}
 	for _, endpoint := range p.discoveryURLs() {
-		if err := validateDiscoveryURL(endpoint); err != nil {
+		if err := discovery.ValidateURL(endpoint); err != nil {
 			return errors.New("--orchestrators must contain absolute HTTP or HTTPS URLs without credentials, query or fragment")
 		}
 	}

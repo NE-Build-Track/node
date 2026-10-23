@@ -1,10 +1,10 @@
 # HTTP API
 
 Routes are unversioned. Orchestrator routes support a deployment base path;
-signer routes are served at the listener root. A proxy exposing the signer under
-a base path must strip that prefix before forwarding requests.
-See [orchestrator setup](orchestrator.md) and [signer setup](signer.md) for
-configuration.
+signer and discovery routes are served at the listener root. A proxy exposing
+either under a base path must strip that prefix before forwarding requests.
+See [orchestrator setup](orchestrator.md), [signer setup](signer.md), and
+[discovery setup](discovery.md) for configuration.
 
 ## Live Runner HTTP
 
@@ -36,6 +36,40 @@ session callback header, and trickle
 `/proxy/{proxy}` remains an accepted alias. O2R channels send periodic
 `{"keep":"alive"}` messages while the runner is registered.
 
+## Discovery HTTP
+
+`GET /discovery` returns available local runners at an orchestrator, or cached
+runners grouped by owning orchestrator at standalone discovery. In this
+live-runner format, `address` is the orchestrator's HTTP(S) base URL, such as
+`https://orch.example.com:8935`; it is distinct from the orchestrator's Ethereum
+wallet address. Standalone discovery prepends an optional `nodes` metadata entry
+with no `address`:
+
+```json
+[
+  {"nodes": [
+    {"url": "https://orch.example.com:8935", "queried_at": "2026-10-22T18:05:00Z"}
+  ]},
+  {"address": "https://orch.example.com:8935", "runners": [
+    {"url": "https://orch.example.com:8935/apps/r1/app", "app": "example", "observed_at": "2026-10-22T18:05:00Z"}
+  ]}
+]
+```
+
+Runner records also carry mode, capacity, prices, and optional metadata/GPU fields.
+Discovery preserves complete runner records. `nodes` lists successfully queried,
+non-evicted sources, and `queried_at` records each source's last successful query
+time. Empty node and runner lists are omitted. With neither to advertise, discovery
+returns `[]`. See [discovery setup](discovery.md) for caching,
+advertising switches, limits, and metrics.
+
+`observed_at` is an RFC3339 timestamp, allowing fractional seconds. Orchestrators
+stamp local runners at response time; discovery preserves that timestamp.
+Collectors and signers skip missing/invalid timestamps and those over 30 seconds
+in the future. Empty inventories succeed; sources advertising runners with no
+valid records fail. Duplicate runner URLs use the newest record and its owning
+address; ties keep the first in source, entry, then runner order.
+
 ## Remote signer HTTP
 
 | Method and route | Response / request |
@@ -46,7 +80,24 @@ session callback header, and trickle
 
 `POST /sign-orchestrator-info` requires no request body. It returns the signer's
 Ethereum account address and a hex signature over that address. The discovery
-response's `address` is an orchestrator service URL, not an Ethereum address.
+response's `address` retains the orchestrator HTTP(S) base URL described above.
+
+### Discovery filters and results
+
+`GET /discover-orchestrators` queries sources on each request, with a five-second
+timeout and 1 MiB response limit per source. It uses complete URLs from the
+[webhook](signer.md#orchestrator-discovery-webhook), or appends `/discovery` to
+configured `Orchestrators` base URLs.
+
+After [deduplicating runners](#discovery-http), it filters by exact `app` and GPU
+name (`gpu`). Repeated values match any value within a filter; both filters must
+match when supplied together. `caps` and payment price ceilings do not apply.
+Results contain `address`, matching `runners`, and `last_seen`, the successful
+query time in UTC. At least one successful source yields HTTP 200 (possibly `[]`);
+no sources or failure of every source yields 503.
+
+Grants restrict outbound connections, not returned URLs. See
+[signer discovery configuration](signer.md#configure-discovery).
 
 ### Payment requests and responses
 
@@ -69,28 +120,6 @@ Earlier state can be replayed; HTTP retries can generate separate tickets.
 Requests are limited to 1 MiB, with a five-second body deadline, a 30-second
 request deadline, and 64 concurrent requests. Oversized payment request bodies
 return 400; admission exhaustion returns 503.
-
-### Discovery filters and results
-
-The signer uses complete discovery URLs supplied by the webhook, or appends
-`/discovery` to each `Orchestrators` base URL when no webhook is configured. It
-queries these sources on every request, with a five-second timeout and 1 MiB response
-limit per source. It filters runners by exact `app` and `gpu` query values;
-`gpu` matches the GPU name. Repeated values match any value within that filter;
-when both filters are present, a runner must satisfy both. `caps` does not
-filter this endpoint.
-
-Each result contains `address`, `runners`, and a UTC
-`last_seen` timestamp for the successful response. Runner records carry their
-URL, application, mode, capacity, optional metadata/GPU, and advertised prices.
-Discovery does not apply the signer's payment price ceilings or merge duplicate
-entries. Failed or blocked sources are omitted when another source
-succeeds. A successful source with no matching runners yields HTTP 200 and
-`[]`; no candidates or failure of every source yields 503.
-
-Grants apply to outbound connections; returned URLs are not filtered. See
-[discovery configuration](signer.md#configure-discovery) for setup and
-[webhook behavior](signer.md#orchestrator-discovery-webhook).
 
 ### Payment limits and refresh
 

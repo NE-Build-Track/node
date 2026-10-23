@@ -29,11 +29,11 @@ func run(args []string) int {
 		return 0
 	case "completion":
 		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: livepeer completion <orchestrator|signer|chain> <bash|zsh|fish|powershell>")
+			fmt.Fprintln(os.Stderr, "usage: livepeer completion <orchestrator|signer|chain|discovery> <bash|zsh|fish|powershell>")
 			return 2
 		}
 		return dispatch(args[1], append([]string{"completion"}, args[2:]...))
-	case "orchestrator", "signer", "chain":
+	case "orchestrator", "signer", "chain", "discovery":
 		return dispatch(args[0], args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown livepeer command %q\n", args[0])
@@ -43,7 +43,7 @@ func run(args []string) int {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stdout, "Usage: livepeer <orchestrator|signer|chain|completion|version> [args...]")
+	fmt.Fprintln(os.Stdout, "Usage: livepeer <orchestrator|signer|chain|discovery|completion|version> [args...]")
 	fmt.Fprintln(os.Stdout)
 	fmt.Fprintln(os.Stdout, "Run 'livepeer help <component>' for component options.")
 }
@@ -68,7 +68,7 @@ func bundledExecutable(component string) (string, error) {
 
 func dispatch(component string, args []string) int {
 	switch component {
-	case "orchestrator", "signer", "chain":
+	case "orchestrator", "signer", "chain", "discovery":
 	default:
 		fmt.Fprintf(os.Stderr, "unknown livepeer component %q\n", component)
 		return 2

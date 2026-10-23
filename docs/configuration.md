@@ -3,7 +3,8 @@
 Services read TOML (`.toml`) or JSON (`.json`). Unknown keys are rejected;
 migration and recovery commands read needed settings and ignore unrelated keys.
 Use the [orchestrator](../configs/orchestrator/config.example.toml),
-[signer](../configs/signer/config.example.toml), and
+[signer](../configs/signer/config.example.toml),
+[discovery](../configs/discovery/config.example.toml), and
 [chain](../configs/chain/config.example.toml) examples as starting points.
 
 Configuration precedence is **CLI > environment > config > default**. Select an
@@ -48,15 +49,18 @@ the component prefix and underscores:
 | Component | Prefix | Example |
 | --- | --- | --- |
 | Orchestrator | `LIVEPEER_ORCHESTRATOR_` | `LIVEPEER_ORCHESTRATOR_BOOTSTRAP_SECRET` |
+| Discovery | `LIVEPEER_DISCOVERY_` | `LIVEPEER_DISCOVERY_NODES` |
 | Signer | `LIVEPEER_SIGNER_` | `LIVEPEER_SIGNER_RPC_URL` |
 | Chain | `LIVEPEER_CHAIN_` | `LIVEPEER_CHAIN_RPC_URL` |
 
-Run `bin/livepeer COMPONENT --help` for flags and defaults. The orchestrator and
-chain support `--print-config` to print configuration with secrets omitted:
+Run `bin/livepeer COMPONENT --help` for flags and defaults. The orchestrator,
+discovery, and chain support `--print-config` to print configuration
+with secrets omitted:
 
 ```sh
 bin/livepeer orchestrator --config /etc/livepeer/orchestrator.toml --print-config
 bin/livepeer chain --config /etc/livepeer/chain.toml --print-config
+bin/livepeer discovery --config /etc/livepeer/discovery.toml --print-config
 ```
 
 Printed configuration also omits secret file paths and the static runner file
@@ -102,9 +106,9 @@ A sole account is selected automatically. Use `--account` (`Account` in TOML) to
 select among accounts, or `--keystore-file` to select a file directly and bypass
 discovery.
 
-| App | Keystore TOML key | Password-file TOML key |
-| --- | --- | --- |
-| All three | `KeystoreFile` | `KeystorePasswordFile` |
+| Keystore TOML key | Password-file TOML key |
+| --- | --- |
+| `KeystoreFile` | `KeystorePasswordFile` |
 
 Signing requires the selected keystore's password.
 Supply the password in a file (`--keystore-password-file`) or an environment
@@ -167,14 +171,16 @@ Health and metrics endpoints use separate loopback listeners:
 | --- | --- | --- |
 | Orchestrator | `127.0.0.1:8935` | `127.0.0.1:8936` |
 | Signer | `127.0.0.1:8937` | `127.0.0.1:8938` |
+| Discovery | `127.0.0.1:8939` | `127.0.0.1:8940` |
 
 ```sh
 curl -fsS http://127.0.0.1:8936/readyz
 curl -fsS http://127.0.0.1:8938/readyz
+curl -fsS http://127.0.0.1:8940/readyz
 ```
 
-Both metrics listeners serve `/healthz`, `/readyz`, and `/metrics`.
-Orchestrator readiness reports that the listener is running; it does not check
-runner health or payment dependencies. Signer readiness checks its payment
-dependencies and, when enabled, local accounting storage. See the component
-guides for those checks.
+All metrics listeners serve `/healthz`, `/readyz`, and `/metrics`.
+Orchestrator and discovery readiness report that their listeners are running;
+they do not check runner health, upstream availability, or payment dependencies.
+Signer readiness checks its payment dependencies and, when enabled, local
+accounting storage. See the component guides for those checks.

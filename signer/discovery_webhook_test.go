@@ -37,9 +37,8 @@ func TestOrchestratorWebhookDiscovery(t *testing.T) {
 			calls := runnerCalls.Add(1)
 			require.Empty(t, r.Header.Get("Authorization"))
 			require.Empty(t, r.Header.Get("X-Webhook"))
-			require.Equal(t, []string{"example", "missing"}, r.URL.Query()["app"])
-			require.Equal(t, []string{"H100"}, r.URL.Query()["gpu"])
-			_, _ = fmt.Fprintf(w, `[{"address":%q,"score":{"ignored":true},"runners":[{"url":%q,"app":"example","gpu":{"name":" H100 "},"capacity_used":%d},{"url":%q,"app":"other"}]}]`, base, base+"/app", calls, base+"/other")
+			require.Empty(t, r.URL.RawQuery, "fetch complete inventories before filtering")
+			_, _ = fmt.Fprintf(w, `[{"address":%q,"score":{"ignored":true},"runners":[{"url":%q,"observed_at":"2026-01-01T00:00:00Z","app":"example","gpu":{"name":" H100 "},"capacity_used":%d},{"url":%q,"observed_at":"2026-01-01T00:00:00Z","app":"other"}]}]`, base, base+"/app", calls, base+"/other")
 		default:
 			staticCalls.Add(1)
 		}

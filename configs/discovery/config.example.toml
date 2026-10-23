@@ -1,0 +1,13 @@
+# DataDir may be set in an explicitly selected config; relative paths use this file's directory.
+# DataDir = "/var/lib/livepeer/discovery"
+Listen = "127.0.0.1:8939"
+MetricsListen = "127.0.0.1:8940"
+
+# Orchestrator or discovery base URLs, including any deployment path.
+# No runners, bootstrap credential, RPC, keystore, or payments are required.
+Nodes = ["http://127.0.0.1:8935"]
+Grants = ["127.0.0.1:8935"] # Private discovery IP[:port] or CIDR grants.
+AdvertiseNodes = true
+AdvertiseRunners = true
+RefreshInterval = "5m"
+MaxFailedRefreshes = 6 # Zero evicts on the first failed refresh.

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	discovery "github.com/livepeer/node/discovery/shared"
 )
 
 type orchestratorWebhook struct {
@@ -142,7 +144,7 @@ func (h *orchestratorWebhook) fetch(ctx context.Context, transport http.RoundTri
 	urls := make([]*url.URL, 0, len(entries))
 	for _, entry := range entries {
 		candidate, err := url.Parse(entry.Address)
-		if err == nil && validateDiscoveryURL(candidate) == nil {
+		if err == nil && discovery.ValidateURL(candidate) == nil {
 			urls = append(urls, candidate)
 		}
 	}
