@@ -2,10 +2,13 @@ package shared
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
@@ -21,14 +24,17 @@ type Snapshot[R Runner] struct {
 // Collector polls complete discovery endpoints and retains per-source inventories.
 // Configure the client and failure limit before starting workers.
 type Collector[R Runner] struct {
-	Client      *http.Client
-	Logger      *slog.Logger
-	MaxFailures int
-	mu          sync.Mutex
-	sources     []*Snapshot[R]
-	pending     chan struct{}
-	initialized bool
-	wake        chan struct{}
+	Client         *http.Client
+	Logger         *slog.Logger
+	MaxFailures    int
+	mu             sync.Mutex
+	sources        []*Snapshot[R]
+	pending        chan struct{}
+	cancel         context.CancelFunc
+	closed         bool
+	initialized    bool
+	sourcesChanged bool
+	wake           chan struct{}
 }
 
 // SetSources preserves retained sources in input order and removes deleted ones.
@@ -44,8 +50,8 @@ func (c *Collector[R]) SetSources(urls []*url.URL) {
 	}
 	next := make([]*Snapshot[R], 0, len(urls))
 	seen := map[string]bool{}
-	changed := len(urls) != len(c.sources)
-	for i, u := range urls {
+	added := false
+	for _, u := range urls {
 		key := u.String()
 		if seen[key] {
 			continue
@@ -54,15 +60,13 @@ func (c *Collector[R]) SetSources(urls []*url.URL) {
 		s := old[key]
 		if s == nil {
 			s = &Snapshot[R]{URL: key}
-			changed = true
-		}
-		if i >= len(c.sources) || c.sources[i].URL != key {
-			changed = true
+			added = true
 		}
 		next = append(next, s)
 	}
 	c.sources = next
-	if changed {
+	if added {
+		c.sourcesChanged = true
 		select {
 		case c.wake <- struct{}{}:
 		default:
@@ -85,76 +89,87 @@ func (c *Collector[R]) Snapshots() []Snapshot[R] {
 	return out
 }
 
-// Refresh coalesces concurrent refreshes; canceling a waiter leaves the owner running.
+// Refresh coalesces fetches owned by the collector; any caller may stop waiting.
 func (c *Collector[R]) Refresh(ctx context.Context, initialOnly bool) {
 	c.mu.Lock()
-	if initialOnly && c.initialized {
+	if c.closed || ctx.Err() != nil || (initialOnly && c.initialized) {
 		c.mu.Unlock()
 		return
 	}
-	if pending := c.pending; pending != nil {
-		c.mu.Unlock()
-		select {
-		case <-ctx.Done():
-		case <-pending:
-		}
-		return
+	if c.pending == nil {
+		fetchCtx, cancel := context.WithCancel(context.Background())
+		c.cancel = cancel
+		c.pending = make(chan struct{})
+		c.sourcesChanged = false
+		go c.refresh(fetchCtx, slices.Clone(c.sources))
 	}
-	c.pending = make(chan struct{})
-	sources := append([]*Snapshot[R](nil), c.sources...)
+	pending := c.pending
 	c.mu.Unlock()
-	defer func() { c.mu.Lock(); close(c.pending); c.pending = nil; c.mu.Unlock() }()
-	jobs := make(chan *Snapshot[R])
-	var workers sync.WaitGroup
-	for range min(5, len(sources)) {
-		workers.Go(func() {
-			for source := range jobs {
-				entries, err := c.fetch(ctx, source.URL)
-				if ctx.Err() != nil {
-					continue
-				}
-				c.mu.Lock()
-				retained := false
-				for _, current := range c.sources {
-					if current == source {
-						retained = true
-						break
-					}
-				}
-				if retained {
-					if err == nil {
-						source.Entries = entries
-						source.QueriedAt = time.Now().UTC()
-						source.Failures = 0
-						c.initialized = true
-					} else {
-						source.Failures = min(source.Failures+1, c.MaxFailures)
-						if source.Failures >= c.MaxFailures {
-							source.Entries = nil
-							source.QueriedAt = time.Time{}
-						}
-					}
-				}
-				c.mu.Unlock()
-				if err != nil {
-					logger := c.Logger
-					if logger == nil {
-						logger = slog.Default()
-					}
-					logger.WarnContext(ctx, "discovery refresh failed", "error", err)
-				}
-			}
-		})
+	select {
+	case <-ctx.Done():
+	case <-pending:
 	}
+}
+
+// Close cancels and joins pending work, and prevents further refreshes.
+func (c *Collector[R]) Close() {
+	c.mu.Lock()
+	c.closed = true
+	if c.cancel != nil {
+		c.cancel()
+	}
+	pending := c.pending
+	c.mu.Unlock()
+	if pending != nil {
+		<-pending
+	}
+	if c.Client != nil {
+		c.Client.CloseIdleConnections()
+	}
+}
+
+func (c *Collector[R]) refresh(ctx context.Context, sources []*Snapshot[R]) {
+	defer func() { c.mu.Lock(); c.cancel(); close(c.pending); c.pending = nil; c.mu.Unlock() }()
+	slots := make(chan struct{}, 5)
+	var workers sync.WaitGroup
 feedLoop:
-	for _, s := range sources {
+	for index, source := range sources {
 		select {
 		case <-ctx.Done():
 			break feedLoop
-		case jobs <- s:
+		case slots <- struct{}{}:
 		}
+		workers.Go(func() {
+			defer func() { <-slots }()
+			entries, err := c.fetch(ctx, source.URL)
+			if ctx.Err() != nil {
+				return
+			}
+			c.mu.Lock()
+			if slices.Contains(c.sources, source) {
+				if err == nil {
+					source.Entries = entries
+					source.QueriedAt = time.Now().UTC()
+					source.Failures = 0
+					c.initialized = true
+				} else {
+					source.Failures = min(source.Failures+1, c.MaxFailures)
+					if source.Failures >= c.MaxFailures {
+						source.Entries = nil
+						source.QueriedAt = time.Time{}
+					}
+				}
+			}
+			c.mu.Unlock()
+			if err != nil {
+				logger := c.Logger
+				if logger == nil {
+					logger = slog.Default()
+				}
+				logger.WarnContext(ctx, "discovery refresh failed", "source_index", index, "error", err)
+			}
+		})
 	}
-	close(jobs)
 	workers.Wait()
 }
 
@@ -165,7 +180,15 @@ func (c *Collector[R]) fetch(ctx context.Context, endpoint string) ([]Entry[R], 
 	}
 	resp, err := c.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("discovery request failed")
+		var requestErr *url.Error
+		if errors.As(err, &requestErr) {
+			err = requestErr.Err
+		}
+		// Go includes the raw Location URL in this error, even after unwrapping.
+		if strings.HasPrefix(err.Error(), "failed to parse Location header ") {
+			err = errors.New("invalid discovery redirect URL")
+		}
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
@@ -178,8 +201,9 @@ func (c *Collector[R]) fetch(ctx context.Context, endpoint string) ([]Entry[R], 
 	return Decode[R](data, time.Now())
 }
 
-// Run polls immediately, on source changes, and at the supplied interval.
+// Run polls immediately, on source additions, and periodically, then closes the collector.
 func (c *Collector[R]) Run(ctx context.Context, interval time.Duration) {
+	defer c.Close()
 	c.mu.Lock()
 	if c.wake == nil {
 		c.wake = make(chan struct{}, 1)
@@ -194,6 +218,13 @@ func (c *Collector[R]) Run(ctx context.Context, interval time.Duration) {
 		default:
 		}
 		c.Refresh(ctx, false)
+		// A joined refresh may have captured its sources before the wakeup.
+		c.mu.Lock()
+		changed := c.sourcesChanged
+		c.mu.Unlock()
+		if changed {
+			continue
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -201,17 +232,6 @@ func (c *Collector[R]) Run(ctx context.Context, interval time.Duration) {
 		case <-wake:
 		}
 	}
-}
-
-// State returns all source states, including sources without a usable inventory.
-func (c *Collector[R]) State() []Snapshot[R] {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([]Snapshot[R], 0, len(c.sources))
-	for _, s := range c.sources {
-		out = append(out, *s)
-	}
-	return out
 }
 
 // AcceptEmpty marks a successful empty source selection as initialized.

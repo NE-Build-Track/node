@@ -31,31 +31,33 @@ import (
 type Params struct {
 	ConfigFile string `name:"config" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables discovery"`
 	nodeconfig.Settings
-	Account                *ethcommon.Address   `descr:"Keystore account address"`
-	Kafka                  *KafkaConfig         `optional:"true"`
-	AuthWebhookHeadersFile string               `basepath:"source" name:"auth-webhook-headers-file" secretfor:"AuthWebhookHeaders"`
-	AuthWebhook            *url.URL             `name:"auth-webhook" optional:"true" secret:"true"`
-	AuthWebhookFile        string               `basepath:"source" name:"auth-webhook-file" secretfor:"AuthWebhook"`
-	AuthWebhookHeaders     Headers              `name:"auth-webhook-headers" optional:"true" secret:"true"`
-	MaxTicketEV            *big.Rat             `name:"max-ticket-ev" default:"3000000000000" descr:"Maximum expected ticket value in wei"`
-	MaxBatchEV             *big.Rat             `name:"max-batch-ev" default:"20000000000000" descr:"Maximum expected batch value in wei"`
-	DepositMultiplier      int64                `name:"deposit-multiplier" default:"1" min:"1" descr:"Maximum face value is deposit divided by this value"`
-	MaxHourlyPrice         *big.Rat             `name:"max-hourly-price" required:"true" descr:"Maximum live price in USD per hour"`
-	MaxFixedPrice          *big.Rat             `name:"max-fixed-price" required:"true" descr:"Maximum fixed request price in USD"`
-	WeiPerUSD              *big.Rat             `name:"wei-per-usd" optional:"true" descr:"Fixed wei per USD conversion, mostly for testing"`
-	ETHUSDFeed             ethcommon.Address    `name:"eth-usd-feed" optional:"true" descr:"ETH/USD oracle address"`
-	ETHUSDMaxAge           time.Duration        `name:"eth-usd-max-age" default:"2h" descr:"Maximum age of the ETH/USD oracle observation"`
-	Listen                 netip.AddrPort       `name:"listen" default:"127.0.0.1:8937"`
-	MetricsListen          netip.AddrPort       `name:"metrics-listen" default:"127.0.0.1:8938"`
-	RPCURL                 *url.URL             `name:"rpc-url" secret:"true" required:"true"`
-	RPCURLFile             string               `basepath:"source" name:"rpc-url-file" secretfor:"RPCURL"`
-	ChainID                *uint64              `name:"chain-id" min:"1" descr:"Optional expected RPC chain ID"`
-	Controller             ethcommon.Address    `name:"controller-address" optional:"true" descr:"Livepeer Controller address"`
-	KeystoreFile           string               `basepath:"source" optional:"true" descr:"Encrypted geth account JSON file; otherwise discover in keystore/"`
-	KeystorePassword       *string              `secret:"true" required:"true" descr:"Keystore decryption password"`
-	KeystorePasswordFile   string               `basepath:"source" secretfor:"KeystorePassword" descr:"Owner-only file containing the exact keystore password bytes"`
-	Orchestrators          []boa.Text[*url.URL] `name:"orchestrators" optional:"true"`
-	DiscoveryGrants        []string             `name:"discovery-grants" optional:"true" descr:"Private discovery IP[:port] or CIDR grants"`
+	Account                     *ethcommon.Address   `descr:"Keystore account address"`
+	Kafka                       *KafkaConfig         `optional:"true"`
+	AuthWebhookHeadersFile      string               `basepath:"source" name:"auth-webhook-headers-file" secretfor:"AuthWebhookHeaders"`
+	AuthWebhook                 *url.URL             `name:"auth-webhook" optional:"true" secret:"true"`
+	AuthWebhookFile             string               `basepath:"source" name:"auth-webhook-file" secretfor:"AuthWebhook"`
+	AuthWebhookHeaders          Headers              `name:"auth-webhook-headers" optional:"true" secret:"true"`
+	MaxTicketEV                 *big.Rat             `name:"max-ticket-ev" default:"3000000000000" descr:"Maximum expected ticket value in wei"`
+	MaxBatchEV                  *big.Rat             `name:"max-batch-ev" default:"20000000000000" descr:"Maximum expected batch value in wei"`
+	DepositMultiplier           int64                `name:"deposit-multiplier" default:"1" min:"1" descr:"Maximum face value is deposit divided by this value"`
+	MaxHourlyPrice              *big.Rat             `name:"max-hourly-price" required:"true" descr:"Maximum live price in USD per hour"`
+	MaxFixedPrice               *big.Rat             `name:"max-fixed-price" required:"true" descr:"Maximum fixed request price in USD"`
+	WeiPerUSD                   *big.Rat             `name:"wei-per-usd" optional:"true" descr:"Fixed wei per USD conversion, mostly for testing"`
+	ETHUSDFeed                  ethcommon.Address    `name:"eth-usd-feed" optional:"true" descr:"ETH/USD oracle address"`
+	ETHUSDMaxAge                time.Duration        `name:"eth-usd-max-age" default:"2h" descr:"Maximum age of the ETH/USD oracle observation"`
+	Listen                      netip.AddrPort       `name:"listen" default:"127.0.0.1:8937"`
+	MetricsListen               netip.AddrPort       `name:"metrics-listen" default:"127.0.0.1:8938"`
+	RPCURL                      *url.URL             `name:"rpc-url" secret:"true" required:"true"`
+	RPCURLFile                  string               `basepath:"source" name:"rpc-url-file" secretfor:"RPCURL"`
+	ChainID                     *uint64              `name:"chain-id" min:"1" descr:"Optional expected RPC chain ID"`
+	Controller                  ethcommon.Address    `name:"controller-address" optional:"true" descr:"Livepeer Controller address"`
+	KeystoreFile                string               `basepath:"source" optional:"true" descr:"Encrypted geth account JSON file; otherwise discover in keystore/"`
+	KeystorePassword            *string              `secret:"true" required:"true" descr:"Keystore decryption password"`
+	KeystorePasswordFile        string               `basepath:"source" secretfor:"KeystorePassword" descr:"Owner-only file containing the exact keystore password bytes"`
+	Orchestrators               []boa.Text[*url.URL] `name:"orchestrators" optional:"true"`
+	DiscoveryRefreshInterval    time.Duration        `default:"5m" descr:"Discovery inventory refresh interval"`
+	DiscoveryMaxFailedRefreshes int                  `default:"6" min:"0" descr:"Consecutive failed discovery refreshes before eviction"`
+	DiscoveryGrants             []string             `name:"discovery-grants" optional:"true" descr:"Private discovery IP[:port] or CIDR grants"`
 
 	OrchestratorWebhook                *url.URL      `name:"orchestrator-webhook" optional:"true" secret:"true"`
 	OrchestratorWebhookFile            string        `basepath:"source" name:"orchestrator-webhook-file" secretfor:"OrchestratorWebhook"`
@@ -85,6 +87,9 @@ func (p Params) discoveryURLs() []*url.URL {
 }
 
 func (p Params) Validate() error {
+	if err := validateDiscoveryPolling(p.DiscoveryRefreshInterval, p.DiscoveryMaxFailedRefreshes); err != nil {
+		return err
+	}
 	if p.Network != "" && p.ChainID == nil {
 		return errors.New("--network (or LIVEPEER_SIGNER_NETWORK) requires an explicit --chain-id and --controller-address for custom networks")
 	}
@@ -196,6 +201,9 @@ func serve(parent context.Context, p Params) error {
 			return err
 		}
 	}
+	if err := service.SetDiscoveryPolling(p.DiscoveryRefreshInterval, p.DiscoveryMaxFailedRefreshes); err != nil {
+		return err
+	}
 	if err := service.SetDiscovery(p.discoveryURLs(), p.DiscoveryGrants...); err != nil {
 		return err
 	}
@@ -254,6 +262,7 @@ func serve(parent context.Context, p Params) error {
 		workers.Go(func() { producer.run(publisherCtx) })
 	}
 	workers.Go(func() { service.RunOrchestratorWebhook(ctx) })
+	workers.Go(func() { service.RunDiscovery(ctx) })
 	if p.WeiPerUSD == nil {
 		workers.Go(func() {
 			refreshPriceFeed(ctx, time.Hour, service.pricePolicy, func(readCtx context.Context) (*big.Rat, time.Time, error) {

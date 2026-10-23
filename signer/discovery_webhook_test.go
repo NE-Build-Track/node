@@ -50,9 +50,10 @@ func TestOrchestratorWebhookDiscovery(t *testing.T) {
 	endpoint := testURL(t, server.URL+"/list?token=private-token")
 	headers := Headers{"Authorization": {"Bearer configured"}, "X-Webhook": {"one", "two"}}
 	require.NoError(t, s.SetOrchestratorWebhook(endpoint, headers, 5*time.Minute))
+	require.NoError(t, s.SetDiscovery([]*url.URL{testURL(t, server.URL+"/static")}, "127.0.0.1"))
 	endpoint.Path = "/mutated"
 	headers["Authorization"][0] = "mutated"
-	for i := 1; i <= 2; i++ {
+	for range 2 {
 		w := discoveryResponse(s, "app=example&app=missing&gpu=H100")
 		require.Equal(t, 200, w.Code, w.Body.String())
 		require.NotContains(t, w.Body.String(), `"score"`)
@@ -60,10 +61,10 @@ func TestOrchestratorWebhookDiscovery(t *testing.T) {
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &entries))
 		require.Len(t, entries, 1)
 		require.Len(t, entries[0].Runners, 1)
-		require.Equal(t, i, entries[0].Runners[0].CapacityUsed, "runner state must remain fresh")
+		require.Equal(t, 1, entries[0].Runners[0].CapacityUsed, "requests reuse cached runner state")
 	}
 	require.Equal(t, int32(1), webhookCalls.Load())
-	require.Equal(t, int32(2), runnerCalls.Load())
+	require.Equal(t, int32(1), runnerCalls.Load())
 	require.Zero(t, staticCalls.Load())
 }
 
@@ -86,7 +87,7 @@ func TestOrchestratorWebhookRefresh(t *testing.T) {
 		var body atomic.Value
 		stall.Store(true)
 		body.Store("private-detail")
-		s.discoveryClient.Transport = webhookTransport(func(r *http.Request) (*http.Response, error) {
+		s.collector.Client.Transport = webhookTransport(func(r *http.Request) (*http.Response, error) {
 			data := "[]"
 			if r.URL.Host == endpoint.Host {
 				calls.Add(1)
@@ -102,6 +103,9 @@ func TestOrchestratorWebhookRefresh(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { defer close(done); s.RunOrchestratorWebhook(ctx) }()
+		inventoryDone := make(chan struct{})
+		go func() { defer close(inventoryDone); s.RunDiscovery(ctx) }()
+		defer func() { cancel(); <-inventoryDone }()
 		defer func() { cancel(); <-done }()
 		synctest.Wait()
 		var requests sync.WaitGroup
@@ -144,7 +148,7 @@ func TestOrchestratorWebhookRefresh(t *testing.T) {
 		body.Store(`[{"address":"https://recovered.example/custom","score":{"ignored":true}}]`)
 		time.Sleep(interval)
 		synctest.Wait()
-		require.Equal(t, "https://recovered.example/custom", s.discoveryURLs(t.Context())[0].String())
+		require.Equal(t, "https://recovered.example/custom", (*s.orchWebhook.urls.Load())[0].String())
 		stall.Store(true)
 		time.Sleep(interval)
 		synctest.Wait()
@@ -222,7 +226,7 @@ func TestOrchestratorWebhookGrants(t *testing.T) {
 			webhookCalls.Store(0)
 			runnerCalls.Store(0)
 			require.NoError(t, s.SetDiscovery(nil, test.grants...))
-			s.orchWebhook.refresh(t.Context(), s.discoveryClient.Transport, false)
+			s.orchWebhook.refresh(t.Context(), s.collector.Client.Transport, false)
 			require.Equal(t, test.status, discoveryResponse(s, "").Code)
 			require.Equal(t, test.hooks, webhookCalls.Load())
 			require.Equal(t, test.runs, runnerCalls.Load())

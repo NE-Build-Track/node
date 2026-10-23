@@ -88,8 +88,12 @@ Orchestrators = ["http://127.0.0.1:8935"]
 DiscoveryGrants = ["127.0.0.1:8935"]
 ```
 
-The signer queries each configured source's `/discovery` endpoint when a client
-calls `GET /discover-orchestrators`.
+The signer appends `/discovery` to static base URLs and uses webhook URLs unchanged.
+It polls at startup and every `DiscoveryRefreshInterval` (positive, default `5m`).
+Fetches have a five-second timeout and 1 MiB response limit. Failed polls retain
+the last inventory until `DiscoveryMaxFailedRefreshes` consecutive failures
+(default `6`, nonnegative) remove it; `0` evicts on the first failure. Recovered
+sources reappear on subsequent polls.
 
 Query the signer to find runners:
 
@@ -140,8 +144,7 @@ Until the first successful list, discovery requests also trigger or await a fetc
 failures return 503. Later requests use the cached list without waiting for refreshes.
 On refresh failure, the last cached list is used. A successful empty response clears it.
 
-Only the orchestrator URLs are cached. For each `GET /discover-orchestrators`
-request, the signer queries those URLs for the current runner list and available capacity.
+Sources returned by the webhook use the inventory polling settings above.
 
 ## Connect a client
 

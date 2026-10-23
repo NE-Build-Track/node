@@ -14,6 +14,8 @@ KeystorePasswordFile = "/run/secrets/livepeer-signer-keystore-password"
 
 # Orchestrators to use
 Orchestrators = []
+DiscoveryRefreshInterval = "5m"
+DiscoveryMaxFailedRefreshes = 6
 
 # Optional discovery webhook; overrides Orchestrators. See docs/signer.md.
 # OrchestratorWebhookFile = "/run/secrets/livepeer-signer-orchestrator-url"

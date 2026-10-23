@@ -17,6 +17,7 @@ import (
 )
 
 type orchestratorWebhook struct {
+	changed  func([]*url.URL)
 	endpoint *url.URL
 	headers  http.Header
 	interval time.Duration
@@ -46,23 +47,21 @@ func (s *Service) SetOrchestratorWebhook(endpoint *url.URL, headers Headers, ref
 	if err := validateOrchestratorWebhook(endpoint, headers, refreshInterval); err != nil {
 		return err
 	}
-	if s.discoveryClient == nil {
+	if s.collector.Client == nil {
 		return errors.New("configure discovery grants with SetDiscovery before the orchestrator webhook")
 	}
 	h := &orchestratorWebhook{
 		endpoint: endpoint.Clone(),
 		headers:  http.Header(headers).Clone(), interval: refreshInterval,
 	}
-	s.orchWebhook = h
-	s.discoveryURLs = func(ctx context.Context) []*url.URL {
-		if h.urls.Load() == nil {
-			h.refresh(ctx, s.discoveryClient.Transport, true)
+	h.changed = func(urls []*url.URL) {
+		s.collector.SetSources(urls)
+		if len(urls) == 0 {
+			s.collector.AcceptEmpty()
 		}
-		if urls := h.urls.Load(); urls != nil {
-			return *urls
-		}
-		return nil
 	}
+	s.collector.SetSources(nil)
+	s.orchWebhook = h
 	return nil
 }
 
@@ -76,7 +75,7 @@ func (s *Service) RunOrchestratorWebhook(ctx context.Context) {
 	ticker := time.NewTicker(h.interval)
 	defer ticker.Stop()
 	for ctx.Err() == nil {
-		h.refresh(ctx, s.discoveryClient.Transport, false)
+		h.refresh(ctx, s.collector.Client.Transport, false)
 		select {
 		case <-ctx.Done():
 			return
@@ -106,6 +105,9 @@ func (h *orchestratorWebhook) refresh(ctx context.Context, transport http.RoundT
 	urls, err := h.fetch(ctx, transport)
 	if err == nil {
 		h.urls.Store(&urls)
+		if h.changed != nil {
+			h.changed(urls)
+		}
 	} else if ctx.Err() == nil {
 		// fetch never returns a URL, credentials, or response body in errors.
 		slog.WarnContext(ctx, "signer orchestrator webhook refresh failed; retaining cached list", "error", err)

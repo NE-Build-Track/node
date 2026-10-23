@@ -45,20 +45,20 @@ type paymentResponse struct {
 }
 
 type Service struct {
-	authClient      *http.Client
-	authURL         *url.URL
-	authPolicy      string
-	authHeaders     Headers
-	key             pm.TicketSigner
-	mux             *http.ServeMux
-	discoveryURLs   func(context.Context) []*url.URL
-	discoveryClient *http.Client
-	orchWebhook     *orchestratorWebhook
-	paymentChain    pm.PayerChain
-	payerPolicy     pm.PayerPolicy
-	pricePolicy     *pricePolicy
-	events          signedTicketSink
-	slots           chan struct{}
+	authClient        *http.Client
+	authURL           *url.URL
+	authPolicy        string
+	authHeaders       Headers
+	key               pm.TicketSigner
+	mux               *http.ServeMux
+	collector         *discovery.Collector[discoveredRunner]
+	discoveryInterval time.Duration
+	orchWebhook       *orchestratorWebhook
+	paymentChain      pm.PayerChain
+	payerPolicy       pm.PayerPolicy
+	pricePolicy       *pricePolicy
+	events            signedTicketSink
+	slots             chan struct{}
 }
 
 func (s *Service) SetPaymentChain(chain pm.PayerChain) { s.paymentChain = chain }
@@ -91,16 +91,39 @@ func (s *Service) SetDiscovery(orchestrators []*url.URL, grants ...string) error
 	}
 	client := policy.Client()
 	client.Timeout = 5 * time.Second
-	previous := s.discoveryClient
-	s.discoveryClient = client
+	s.collector.Close()
+	s.collector = &discovery.Collector[discoveredRunner]{Client: client, MaxFailures: s.collector.MaxFailures}
 	if s.orchWebhook == nil {
-		s.discoveryURLs = func(context.Context) []*url.URL { return urls }
-	}
-	if previous != nil {
-		previous.CloseIdleConnections()
+		s.collector.SetSources(urls)
+	} else if cached := s.orchWebhook.urls.Load(); cached != nil {
+		s.collector.SetSources(*cached)
+		s.collector.AcceptEmpty()
 	}
 	return nil
 }
+
+func validateDiscoveryPolling(interval time.Duration, maxFailedRefreshes int) error {
+	if interval <= 0 {
+		return errors.New("discovery-refresh-interval must be positive")
+	}
+	if maxFailedRefreshes < 0 {
+		return errors.New("discovery-max-failed-refreshes must be nonnegative")
+	}
+	return nil
+}
+
+// SetDiscoveryPolling configures polling before serving requests or starting workers.
+func (s *Service) SetDiscoveryPolling(interval time.Duration, maxFailedRefreshes int) error {
+	if err := validateDiscoveryPolling(interval, maxFailedRefreshes); err != nil {
+		return err
+	}
+	s.discoveryInterval, s.collector.MaxFailures = interval, max(1, maxFailedRefreshes)
+	return nil
+}
+
+// RunDiscovery refreshes inventories until cancellation. When using a webhook,
+// also run RunOrchestratorWebhook. Wait for both workers before Close.
+func (s *Service) RunDiscovery(ctx context.Context) { s.collector.Run(ctx, s.discoveryInterval) }
 
 func NewService(key *eth.Key) (*Service, error) {
 	if key == nil {
@@ -110,9 +133,7 @@ func NewService(key *eth.Key) (*Service, error) {
 }
 
 func (s *Service) Close() error {
-	if s.discoveryClient != nil {
-		s.discoveryClient.CloseIdleConnections()
-	}
+	s.collector.Close()
 	if s.authClient != nil {
 		s.authClient.CloseIdleConnections()
 	}
@@ -121,11 +142,12 @@ func (s *Service) Close() error {
 
 func newService(key *eth.Key) *Service {
 	s := &Service{
-		key:           key,
-		mux:           http.NewServeMux(),
-		payerPolicy:   pm.DefaultPayerPolicy(),
-		slots:         make(chan struct{}, 64),
-		discoveryURLs: func(context.Context) []*url.URL { return nil },
+		key:               key,
+		mux:               http.NewServeMux(),
+		payerPolicy:       pm.DefaultPayerPolicy(),
+		slots:             make(chan struct{}, 64),
+		collector:         &discovery.Collector[discoveredRunner]{MaxFailures: 6},
+		discoveryInterval: 5 * time.Minute,
 	}
 	s.mux.HandleFunc("POST /sign-orchestrator-info", s.signInfo)
 	s.mux.HandleFunc("POST /generate-live-payment", s.generate)
@@ -217,52 +239,28 @@ type discoveredOrchestrator struct {
 }
 
 func (s *Service) discover(w http.ResponseWriter, r *http.Request) {
-	sources := s.discoveryURLs(r.Context())
-	if len(sources) == 0 {
-		slog.WarnContext(r.Context(), "signer discovery has no available sources")
-		signerError(w, http.StatusServiceUnavailable, "no orchestrator discovery sources available")
+	if !s.collector.Initialized() {
+		if s.orchWebhook != nil {
+			s.orchWebhook.refresh(r.Context(), s.collector.Client.Transport, true)
+		}
+		s.collector.Refresh(r.Context(), true)
+	}
+	snapshots := s.collector.Snapshots()
+	if len(snapshots) == 0 {
+		signerError(w, http.StatusServiceUnavailable, "orchestrator discovery unavailable")
 		return
 	}
 	appFilter := r.URL.Query()["app"]
 	gpuFilter := r.URL.Query()["gpu"]
-	available := false
-	inventories := make([]discovery.Entry[discoveredRunner], 0, len(sources))
-	observations := make(map[string]time.Time)
-	for source, endpoint := range sources {
-		request, err := http.NewRequestWithContext(r.Context(), http.MethodGet, endpoint.String(), nil)
-		if err != nil {
-			slog.ErrorContext(r.Context(), "signer discovery request construction failed", "source_index", source, "error", err)
-			continue
-		}
-		response, err := s.discoveryClient.Do(request)
-		if err != nil {
-			slog.WarnContext(r.Context(), "signer discovery source unavailable", "source_index", source, "error", err)
-			continue
-		}
-		if response.StatusCode != 200 {
-			slog.WarnContext(r.Context(), "signer discovery source returned non-200 HTTP status", "source_index", source, "http_status", response.StatusCode)
-			_ = response.Body.Close()
-			continue
-		}
-		data, decodeErr := discovery.Read(response.Body)
-		_ = response.Body.Close()
-		if decodeErr != nil {
-			slog.WarnContext(r.Context(), "signer discovery response read failed", "source_index", source, "error", decodeErr)
-			continue
-		}
-		observed := time.Now().UTC()
-		entries, decodeErr := discovery.Decode[discoveredRunner](data, observed)
-		if decodeErr != nil {
-			slog.WarnContext(r.Context(), "signer discovery response invalid", "source_index", source, "error", decodeErr)
-			continue
-		}
-		available = true
-		for _, entry := range entries {
-			if _, exists := observations[entry.Address]; !exists {
-				observations[entry.Address] = observed
+	inventories := []discovery.Entry[discoveredRunner]{}
+	observations := map[string]time.Time{}
+	for _, snapshot := range snapshots {
+		inventories = append(inventories, snapshot.Entries...)
+		for _, entry := range snapshot.Entries {
+			if _, ok := observations[entry.Address]; !ok {
+				observations[entry.Address] = snapshot.QueriedAt
 			}
 		}
-		inventories = append(inventories, entries...)
 	}
 	result := make([]discoveredOrchestrator, 0)
 	for _, entry := range discovery.Merge(inventories) {
@@ -285,10 +283,6 @@ func (s *Service) discover(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !available {
-		signerError(w, http.StatusServiceUnavailable, "orchestrator discovery unavailable")
-		return
-	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
 }

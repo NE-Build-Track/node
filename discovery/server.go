@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/livepeer/node/destination"
@@ -20,21 +19,13 @@ type discoveryNode struct {
 	URL       string    `json:"url"`
 	QueriedAt time.Time `json:"queried_at"`
 }
-type nodeSnapshot struct {
-	node     discoveryNode
-	entries  []discoveryEntry
-	failures int
-}
 type Server struct {
 	logger                           *slog.Logger
 	mux                              *http.ServeMux
-	client                           *http.Client
 	urls                             []*url.URL
 	interval                         time.Duration
-	maxFailures                      int
 	advertiseNodes, advertiseRunners bool
-	mu                               sync.RWMutex
-	snapshots                        []nodeSnapshot
+	collector                        *discovery.Collector[discoveryRunner]
 }
 
 func discoveryBases(p Params) ([]*url.URL, error) {
@@ -81,15 +72,26 @@ func NewServer(p Params, logger *slog.Logger) (*Server, error) {
 	client.Timeout = 3 * time.Second
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	s := &Server{logger: logger, mux: http.NewServeMux(),
-		client: client, urls: urls, interval: p.RefreshInterval, maxFailures: max(1, p.MaxFailedRefreshes),
-		advertiseNodes: p.AdvertiseNodes, advertiseRunners: p.AdvertiseRunners, snapshots: make([]nodeSnapshot, len(urls))}
+		urls: urls, interval: p.RefreshInterval,
+		advertiseNodes: p.AdvertiseNodes, advertiseRunners: p.AdvertiseRunners,
+		collector: &discovery.Collector[discoveryRunner]{Client: client, MaxFailures: max(1, p.MaxFailedRefreshes), Logger: logger}}
+	endpoints := make([]*url.URL, 0, len(urls))
+	for _, base := range urls {
+		endpoint := base.Clone()
+		endpoint.Path += "/discovery"
+		if endpoint.RawPath != "" {
+			endpoint.RawPath += "/discovery"
+		}
+		endpoints = append(endpoints, endpoint)
+	}
+	s.collector.SetSources(endpoints)
 	s.mux.HandleFunc("GET /discovery", s.discovery)
 	return s, nil
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
-func (s *Server) Close() { s.client.CloseIdleConnections() }
+func (s *Server) Close() { s.collector.Close() }
 
 func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 	body, err := json.Marshal(s.discoveryResponse())
@@ -111,98 +113,20 @@ func (d *Server) Run(ctx context.Context) {
 	if (!d.advertiseNodes && !d.advertiseRunners) || len(d.urls) == 0 {
 		return
 	}
-	ticker := time.NewTicker(d.interval)
-	defer ticker.Stop()
-	for ctx.Err() == nil {
-		d.refresh(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
-}
-
-func (d *Server) refresh(ctx context.Context) {
-	jobs := make(chan int)
-	var workers sync.WaitGroup
-	for range min(5, len(d.urls)) {
-		workers.Go(func() {
-			for i := range jobs {
-				entries, err := d.fetch(ctx, d.urls[i])
-				if ctx.Err() != nil {
-					continue
-				}
-				d.mu.Lock()
-				previous := &d.snapshots[i]
-				if err == nil {
-					*previous = nodeSnapshot{node: discoveryNode{URL: d.urls[i].String(), QueriedAt: time.Now().UTC()}, entries: entries}
-				} else {
-					previous.failures = min(previous.failures+1, d.maxFailures)
-					if previous.failures >= d.maxFailures {
-						previous.node = discoveryNode{}
-						previous.entries = nil
-					}
-				}
-				d.mu.Unlock()
-				if err != nil {
-					d.logger.WarnContext(ctx, "discovery refresh failed", "source", d.urls[i].String(), "error", err)
-				}
-			}
-		})
-	}
-	defer workers.Wait()
-	defer close(jobs)
-	for i := range d.urls {
-		select {
-		case <-ctx.Done():
-			return
-		case jobs <- i:
-		}
-	}
-}
-
-func (d *Server) fetch(ctx context.Context, base *url.URL) ([]discoveryEntry, error) {
-	endpoint := base.Clone()
-	endpoint.Path += "/discovery"
-	if endpoint.RawPath != "" {
-		endpoint.RawPath += "/discovery"
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return nil, err
-	}
-	response, err := d.client.Do(request)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("discovery source returned HTTP %d", response.StatusCode)
-	}
-	data, err := discovery.Read(response.Body)
-	if err != nil {
-		return nil, err
-	}
-	return discovery.Decode[discoveryRunner](data, time.Now())
+	d.collector.Run(ctx, d.interval)
 }
 
 func (s *Server) discoveryResponse() []map[string]any {
 	nodes := []discoveryNode{}
 	entries := []discoveryEntry{}
-	s.mu.RLock()
-	for _, snapshot := range s.snapshots {
-		if snapshot.node.QueriedAt.IsZero() {
-			continue
-		}
+	for _, snapshot := range s.collector.Snapshots() {
 		if s.advertiseNodes {
-			nodes = append(nodes, snapshot.node)
+			nodes = append(nodes, discoveryNode{URL: strings.TrimSuffix(snapshot.URL, "/discovery"), QueriedAt: snapshot.QueriedAt})
 		}
 		if s.advertiseRunners {
-			entries = append(entries, snapshot.entries...)
+			entries = append(entries, snapshot.Entries...)
 		}
 	}
-	s.mu.RUnlock()
 	result := []map[string]any{}
 	if len(nodes) > 0 {
 		result = append(result, map[string]any{"nodes": nodes})

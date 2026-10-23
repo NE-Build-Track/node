@@ -30,6 +30,7 @@ import (
 func validParams(t *testing.T) Params {
 	t.Helper()
 	return Params{
+		DiscoveryRefreshInterval: 5 * time.Minute, DiscoveryMaxFailedRefreshes: 6,
 		Listen:        netip.MustParseAddrPort("0.0.0.0:8937"),
 		MetricsListen: netip.MustParseAddrPort("127.0.0.1:8938"),
 		KeystoreFile:  "key", KeystorePasswordFile: "password", DepositMultiplier: 1,
@@ -44,6 +45,9 @@ func validParams(t *testing.T) Params {
 
 func TestSignerConfigurationValidation(t *testing.T) {
 	require.NoError(t, validParams(t).Validate())
+	p := validParams(t)
+	p.DiscoveryMaxFailedRefreshes = 0
+	require.NoError(t, p.Validate())
 	for _, test := range []struct {
 		name   string
 		change func(*Params)
@@ -68,6 +72,8 @@ func TestSignerConfigurationValidation(t *testing.T) {
 			p.OrchestratorWebhookRefreshInterval = -time.Minute
 		}, "orchestrator-webhook-refresh-interval"},
 		{"invalid orchestrator webhook", func(p *Params) { p.OrchestratorWebhook = testURL(t, "https://user:secret@webhook.example") }, "orchestrator webhook URL"},
+		{"zero discovery interval", func(p *Params) { p.DiscoveryRefreshInterval = 0 }, "discovery-refresh-interval"},
+		{"discovery failure threshold", func(p *Params) { p.DiscoveryMaxFailedRefreshes = -1 }, "discovery-max-failed-refreshes"},
 		{"invalid discovery grant", func(p *Params) { p.DiscoveryGrants = []string{"ftp://localhost"} }, "signer-discovery destination grant"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

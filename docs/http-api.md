@@ -84,17 +84,15 @@ response's `address` retains the orchestrator HTTP(S) base URL described above.
 
 ### Discovery filters and results
 
-`GET /discover-orchestrators` queries sources on each request, with a five-second
-timeout and 1 MiB response limit per source. It uses complete URLs from the
-[webhook](signer.md#orchestrator-discovery-webhook), or appends `/discovery` to
-configured `Orchestrators` base URLs.
+`GET /discover-orchestrators` returns cached runner inventories.
 
 After [deduplicating runners](#discovery-http), it filters by exact `app` and GPU
 name (`gpu`). Repeated values match any value within a filter; both filters must
 match when supplied together. `caps` and payment price ceilings do not apply.
 Results contain `address`, matching `runners`, and `last_seen`, the successful
-query time in UTC. At least one successful source yields HTTP 200 (possibly `[]`);
-no sources or failure of every source yields 503.
+poll time of the cached source in UTC. At least one usable cached inventory yields
+HTTP 200 (possibly `[]`); none yields 503. Cached results can remain available
+while a source is unreachable.
 
 Grants restrict outbound connections, not returned URLs. See
 [signer discovery configuration](signer.md#configure-discovery).

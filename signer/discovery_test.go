@@ -163,22 +163,22 @@ func TestSignerDiscoveryReplacement(t *testing.T) {
 	require.Equal(t, 503, discoveryResponse(s, "").Code)
 	endpoint := testURL(t, "https://orch.example/deployment/")
 	require.NoError(t, s.SetDiscovery([]*url.URL{endpoint}))
-	require.Equal(t, "https://orch.example/deployment/discovery", s.discoveryURLs(t.Context())[0].String())
 	require.Equal(t, "/deployment/", endpoint.Path)
-	require.Equal(t, 5*time.Second, s.discoveryClient.Timeout)
-	previous := s.discoveryClient
+	require.Equal(t, 5*time.Second, s.collector.Client.Timeout)
+	previous := s.collector.Client
+	previousCollector := s.collector
 	tracker := new(discoveryCloseTracker)
 	previous.Transport = tracker
 	for _, invalid := range []*url.URL{nil, testURL(t, "file:///discovery"), testURL(t, "https://user:password@orch.example"), testURL(t, "https://orch.example?token=secret"), testURL(t, "https://orch.example?"), testURL(t, "https://orch.example#fragment")} {
 		require.Error(t, s.SetDiscovery([]*url.URL{invalid}))
-		require.Same(t, previous, s.discoveryClient)
+		require.Same(t, previous, s.collector.Client)
 	}
 	require.Error(t, s.SetDiscovery([]*url.URL{endpoint}, "ftp://localhost"))
-	require.Same(t, previous, s.discoveryClient)
-	require.Equal(t, "https://orch.example/deployment/discovery", s.discoveryURLs(t.Context())[0].String())
+	require.Same(t, previous, s.collector.Client)
+	require.Same(t, previousCollector, s.collector)
 	require.False(t, tracker.closed)
 	require.NoError(t, s.SetDiscovery(nil))
-	require.Empty(t, s.discoveryURLs(t.Context()))
+	require.Equal(t, 503, discoveryResponse(s, "").Code)
 	require.True(t, tracker.closed)
 }
 
@@ -189,7 +189,7 @@ func TestSignerDiscoveryFreshnessMerge(t *testing.T) {
 	const old = `[{"address":"https://owner-old.example","runners":[{"url":"https://runner.example/app","app":"old","gpu":{"name":"H100"},"observed_at":"2026-01-01T00:00:00Z","capacity":99}]}]`
 	const fresh = `[{"address":"https://owner-new.example","runners":[{"url":"https://runner.example/app","app":"new","gpu":{"name":"L40S"},"observed_at":"2026-01-01T02:00:00.123+01:00","capacity":1},{"url":"https://other.example/app","app":"new","gpu":{"name":"L40S"},"observed_at":"2026-01-01T00:00:00Z"}]}]`
 	var offline atomic.Bool
-	s.discoveryClient.Transport = webhookTransport(func(r *http.Request) (*http.Response, error) {
+	s.collector.Client.Transport = webhookTransport(func(r *http.Request) (*http.Response, error) {
 		body := old
 		if r.URL.Host == "second.example" {
 			if offline.Load() {
@@ -221,6 +221,9 @@ func TestSignerDiscoveryFreshnessMerge(t *testing.T) {
 		require.JSONEq(t, "[]", discoveryResponse(s, query).Body.String(), "resolve duplicates before filtering")
 	}
 	offline.Store(true)
+	for range 6 {
+		s.collector.Refresh(t.Context(), false)
+	}
 	w = discoveryResponse(s, "")
 	require.Equal(t, 200, w.Code)
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
