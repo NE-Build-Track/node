@@ -1,0 +1,43 @@
+name: Clean Dependabot descriptions
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, edited]
+
+permissions:
+  pull-requests: write
+
+concurrency:
+  group: clean-dependabot-${{ github.event.pull_request.number }}
+
+jobs:
+  clean:
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-26.04
+    steps:
+      # This privileged workflow only edits PR metadata; do not run PR code here.
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const params = {
+              ...context.repo,
+              pull_number: context.issue.number,
+            };
+            const { data: pr } = await github.rest.pulls.get(params);
+            if (pr.state !== 'open') return;
+
+            const before = pr.body ?? '';
+            const after = before
+              .split(/\nDependabot will resolve any conflicts\b/)[0]
+              .replace(/<details\b[^>]*>[\s\S]*?<\/details>/gi, '')
+              .replace(/<br\s*\/?>/gi, '')
+              .replace(/\n{3,}/g, '\n\n')
+              .trim();
+
+            if (!after || /<!--|<\/?[a-z][^>]*>/i.test(after)) {
+              throw new Error('Unexpected description format; manual cleanup required.');
+            }
+
+            if (after !== before.trim()) {
+              await github.rest.pulls.update({ ...params, body: after });
+            }
