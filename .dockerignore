@@ -9,6 +9,7 @@
 !chain/
 !cmd/
 !destination/
+!discovery/
 !eth/
 !nodeconfig/
 !orchestrator/
