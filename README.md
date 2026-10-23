@@ -20,7 +20,7 @@ configuration.
 
 ## Build
 
-Install Go 1.27.3 or newer, then run from the repository root:
+Install the Go version declared in [go.mod](go.mod) or newer, then run from the repository root:
 
 ```sh
 make build

@@ -253,8 +253,12 @@ func checkGoSDK(t *testing.T, root, serviceURL, runnerURL string) {
 	if sdkDir == "" {
 		return
 	}
+	module := exec.Command("go", "list", "-m", "-f", "{{.GoVersion}}")
+	module.Dir = root
+	goVersion, err := module.Output()
+	require.NoError(t, err)
 	dir := t.TempDir()
-	goMod := "module sdkcompat\n\ngo 1.27.3\n\nrequire github.com/livepeer/golang-runner v0.0.0\n\nreplace github.com/livepeer/golang-runner => " + sdkDir + "\n"
+	goMod := fmt.Sprintf("module sdkcompat\n\ngo %s\n\nrequire github.com/livepeer/golang-runner v0.0.0\n\nreplace github.com/livepeer/golang-runner => %s\n", strings.TrimSpace(string(goVersion)), sdkDir)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte(goMod), 0600))
 	source, err := os.ReadFile(filepath.Join(root, "cmd", "livepeer", "testdata", "go_sdk_compat.go"))
 	require.NoError(t, err)

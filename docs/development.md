@@ -1,6 +1,8 @@
 # Development
 
-The module requires Go 1.27.3 or newer. Build all executables with:
+The minimum Go version is declared in [go.mod](../go.mod). CI and release metadata
+use that version; keep the digest-pinned Go builder in `docker/Dockerfile` aligned
+with it. Build all executables with:
 
 ```sh
 make build
