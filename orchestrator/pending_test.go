@@ -15,7 +15,11 @@ func TestPendingPaymentDoesNotExposeOrBillSession(t *testing.T) {
 	quote, _, err := r.PriceForRunner("r")
 	require.NoError(t, err)
 	var events []string
-	r.onEvent = func(_, event, _ string) { events = append(events, event) }
+	var reservedToken string
+	r.onEvent = func(_, event, _, token string) {
+		events = append(events, event)
+		reservedToken = token
+	}
 	id, _, _, _, err := r.reserveWithPrice("r", "payment-manifest", &quote)
 	require.NoError(t, err)
 	require.Empty(t, events)
@@ -30,9 +34,11 @@ func TestPendingPaymentDoesNotExposeOrBillSession(t *testing.T) {
 	require.True(t, r.activateSession("r", id))
 	require.Equal(t, []string{"reserved"}, events)
 	require.Equal(t, []string{id}, r.PaidSessions())
-	_, _, status, err = r.sessionTarget("r", id)
+	_, token, status, err := r.sessionTarget("r", id)
 	require.NoError(t, err)
 	require.Equal(t, 200, status)
+	require.NotEmpty(t, reservedToken)
+	require.Equal(t, token, reservedToken)
 	r.ReleaseBySession(id)
 	require.False(t, r.activateSession("r", id), "a released pending reservation cannot be resurrected")
 }

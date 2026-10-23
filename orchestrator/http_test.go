@@ -75,6 +75,7 @@ func TestDynamicRunnerSessionProxyAndCapacity(t *testing.T) {
 	require.NoError(t, json.NewDecoder(response.Body).Decode(&event))
 	require.Equal(t, "reserved", event["event"])
 	require.Equal(t, reserved.SessionID, event["session"])
+	require.True(t, registry.validSessionToken(heartbeat.RunnerID, reserved.SessionID, event["session_token"]))
 	require.NoError(t, response.Body.Close())
 	response, err = http.Post(srv.URL+"/apps/"+heartbeat.RunnerID+"/session", "application/json", nil)
 	require.NoError(t, err)

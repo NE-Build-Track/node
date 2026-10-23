@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -199,7 +200,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, status, resp)
 }
 
-func (s *Server) emitSessionEvent(runnerID, event, sid string) {
+func (s *Server) emitSessionEvent(runnerID, event, sid, token string) {
 	if event == "expired" || event == "unregistered" {
 		s.mu.Lock()
 		for id, ch := range s.channels {
@@ -211,7 +212,16 @@ func (s *Server) emitSessionEvent(runnerID, event, sid string) {
 		s.mu.Unlock()
 		return
 	}
-	data, err := json.Marshal(map[string]string{"event": event, "session": sid, "timestamp": time.Now().UTC().Format(time.RFC3339Nano)})
+	filterEmpty := func(m map[string]string) map[string]string {
+		maps.DeleteFunc(m, func(_, value string) bool { return value == "" })
+		return m
+	}
+	data, err := json.Marshal(filterEmpty(map[string]string{
+		"event":         event,
+		"session":       sid,
+		"session_token": token,
+		"timestamp":     time.Now().UTC().Format(time.RFC3339Nano),
+	}))
 	if err != nil {
 		return
 	}

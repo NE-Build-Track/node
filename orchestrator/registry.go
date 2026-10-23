@@ -135,7 +135,7 @@ type Registry struct {
 	runnerService string
 	interval      time.Duration
 	ttl           time.Duration
-	onEvent       func(runnerID, event, sessionID string)
+	onEvent       func(runnerID, event, sessionID, sessionToken string)
 	weiPerUSD     *big.Rat
 	rateUntil     time.Time
 	proxyTemplate string
@@ -377,7 +377,7 @@ func (r *Registry) Unregister(id, auth string) (int, error) {
 		r.releaseLocked(id, sid, nil)
 	}
 	if r.onEvent != nil {
-		r.onEvent(id, "unregistered", "")
+		r.onEvent(id, "unregistered", "", "")
 	}
 	delete(r.runners, id)
 	return http.StatusOK, nil
@@ -498,7 +498,7 @@ func (r *Registry) reserveWithPrice(id, requestedID string, agreed *priceInfo) (
 		appURL = r.proxyURL(proxyID)
 	}
 	if agreed == nil && r.onEvent != nil {
-		r.onEvent(id, "reserved", sessionID)
+		r.onEvent(id, "reserved", sessionID, token)
 	}
 	return sessionID, appURL, r.service + "/apps/" + url.PathEscape(id) + "/session/" + url.PathEscape(sessionID), http.StatusOK, nil
 }
@@ -589,7 +589,7 @@ func (r *Registry) releaseLocked(id, sid string, cause error) {
 	item.Sessions[sid].cancel(cause)
 	delete(item.Sessions, sid)
 	if r.onEvent != nil {
-		r.onEvent(id, "released", sid)
+		r.onEvent(id, "released", sid, "")
 	}
 }
 
@@ -612,7 +612,7 @@ func (r *Registry) Close() {
 			r.releaseLocked(id, sid, nil)
 		}
 		if r.onEvent != nil {
-			r.onEvent(id, "unregistered", "")
+			r.onEvent(id, "unregistered", "", "")
 		}
 	}
 }
@@ -684,7 +684,7 @@ func (r *Registry) Expire() {
 				r.releaseLocked(id, sid, nil)
 			}
 			if r.onEvent != nil {
-				r.onEvent(id, "expired", "")
+				r.onEvent(id, "expired", "", "")
 			}
 			delete(r.runners, id)
 		}
@@ -834,7 +834,7 @@ func (r *Registry) activateSession(id, sid string) bool {
 	if sess.pending {
 		sess.pending = false
 		if r.onEvent != nil {
-			r.onEvent(id, "reserved", sid)
+			r.onEvent(id, "reserved", sid, sess.Token)
 		}
 	}
 	return true
