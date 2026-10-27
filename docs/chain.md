@@ -1,32 +1,25 @@
 # Chain commands
 
-The `chain` command manages stake, earnings, deposits, and other on-chain state
-related to the Livepeer protocol. Use it to check balances, stake LPT, register
-an orchestrator, withdraw funds, or vote on protocol proposals.
-
-Run it as `bin/livepeer chain` or `bin/livepeer-chain`. Configure the blockchain
-connection (RPC endpoint) using a
+Run `livepeer chain` or `livepeer-chain` to inspect protocol state, manage funds
+and stake, register orchestrators, and vote. Set RPC access in a
 [chain config](../configs/chain/config.example.toml) or environment variables.
-Accounts can be inferred from the shared keystore. Use `--account` or
-`LIVEPEER_CHAIN_ACCOUNT` to select one; see [configuration and secrets](configuration.md).
+Accounts are inferred from the keystore; use `--account` or
+`LIVEPEER_CHAIN_ACCOUNT` to select one. See [configuration](configuration.md).
 
 ```sh
-bin/livepeer chain --config /etc/livepeer/chain.toml account get
-bin/livepeer chain --config /etc/livepeer/chain.toml stake bond ADDRESS --amount 10
+livepeer chain --config /etc/livepeer/chain.toml account get
+livepeer chain --config /etc/livepeer/chain.toml stake bond ADDRESS --amount 10
 ```
 
-Transaction commands perform a dry run by default. Add `--submit` to sign and broadcast transactions and wait for
-inclusion in a block. Submissions require a keystore matching the selected
-account; reads and dry runs need no password.
+Transactions dry-run by default. Add `--submit` to sign, broadcast, and wait for
+block inclusion. Submissions need a keystore matching the selected account;
+reads and dry runs need no password.
 
-Prefix all commands below by `bin/livepeer chain`. Add `--config FILE` to load a configuration file, or `--help` to see a command's flags and defaults.
+Prefix commands below with `livepeer chain`; add `--config FILE` or `--help` as needed.
 
 ## Accounts and protocol state
 
-`account create --keystore-password-file /path/to/password` creates an encrypted
-account in the shared keystore and prints its address. See
-[keystore setup](configuration.md#prepare-a-keystore) for password preparation
-and file overrides.
+See [keystore setup](configuration.md#prepare-a-keystore) for account creation.
 
 | Command | Purpose |
 | --- | --- |
@@ -66,12 +59,11 @@ stake withdraw --lock-id ID
 
 Use `stake get` to inspect stake, pending earnings, and the current orchestrator.
 
-Bonding deposits liquid LPT from the wallet and includes any required ERC20 approval transaction. Redelegation
+Bonding deposits wallet LPT, including any required ERC20 approval. Redelegation
 moves existing stake; choose one mode. Unbonding creates a withdrawal lock.
 
-Cancel-unbond restores the locked LPT to stake. If the account is still staked,
-`ADDRESS` is optional: the LPT returns to the current orchestrator. If fully unbonded, `ADDRESS` is
-required to choose an orchestrator.
+Cancel-unbond restores locked LPT to the current orchestrator if still staked;
+otherwise `ADDRESS` is required to choose one.
 
 List outstanding locks with `stake locks`, filtering by either `--withdrawable`
 or `--locked`. Paginate with `--from-id` and `--limit` (default 100, maximum 1000).
@@ -90,14 +82,11 @@ orchestrator reward-caller set ADDRESS
 orchestrator reward-caller unset
 ```
 
-Use `orchestrator get` for registration status and settings, and `orchestrator list`
-for pool members.
-
-`register` registers the configured account as an orchestrator. Unless the account is already
-self-bonded, choose one staking source: wallet LPT, existing stake, or an unbonding
-lock. Omitting the optional service URI preserves its current value; supply one
-when none is configured. Supplied URIs
-must be absolute HTTP/HTTPS URLs without credentials, query strings, or fragments.
+`get` shows registration/settings; `list` shows pool members. To `register` the
+configured account, choose one staking source unless already self-bonded:
+wallet LPT, existing stake, or an unbonding lock. An omitted service URI preserves
+the current value; supply one if unset. URIs must be absolute HTTP/HTTPS without
+credentials, queries, or fragments.
 
 `set-config` preserves omitted values; unchanged settings need no transaction.
 Commission changes require an unlocked round. Calling `reward-caller set` authorizes another account to call

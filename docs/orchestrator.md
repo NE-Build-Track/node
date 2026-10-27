@@ -1,17 +1,15 @@
 # Running an orchestrator
 
-The orchestrator registers HTTP runners, advertises them through discovery,
-reserves sessions, and forwards application traffic. It can run in on-chain or
-off-chain mode, supporting persistent sessions and single-shot requests, HTTP
-streaming, server-sent events (SSE), WebSockets, callbacks, and
-[Trickle channels](../trickle/README.md).
+The orchestrator registers and advertises runners, reserves sessions, and
+forwards HTTP, SSE, WebSocket, and [Trickle](../trickle/README.md) traffic.
+It supports persistent sessions and single-shot requests, on-chain or off-chain.
 
 Start with the [local example](../README.md#run-a-local-example). For deployment,
 copy the [configuration example](../configs/orchestrator/config.example.toml),
 set its paths and destinations, and run:
 
 ```sh
-bin/livepeer orchestrator --config /etc/livepeer/orchestrator.toml
+livepeer orchestrator --config /etc/livepeer/orchestrator.toml
 ```
 
 ## Register runners
@@ -24,28 +22,22 @@ heartbeats and unregister requests. Set `BootstrapSecretFile` as described in
 [configuration and secrets](configuration.md#credential-files). If you use only
 dynamic runners, omit `RunnerConfig`.
 
-Static runners are loaded from `RunnerConfig` using `[[Runners]]` tables with
-Go field names, including `RunnerURL`, `HealthURL`, and `HealthCode`. Optional
-GPU and price tables use `[Runners.GPU]` and `[Runners.PriceInfo]`. Use the
-[runner example](../configs/orchestrator/runners.example.toml) to set each
-runner's ID, URL, application, mode, capacity, and health check. If you use only
-static runners, omit `BootstrapSecretFile`. Their health URLs are checked
-every `HeartbeatInterval` (five seconds by default). A runner with a health URL
-is unavailable until its first successful check; three consecutive failed checks
-release its sessions.
+Static runners load from `RunnerConfig`: `[[Runners]]` tables with Go field
+names such as `RunnerURL`, `HealthURL`, and `HealthCode`, plus optional
+`[Runners.GPU]` and `[Runners.PriceInfo]`. Follow the
+[runner example](../configs/orchestrator/runners.example.toml); omit
+`BootstrapSecretFile` for static-only operation. Health URLs are checked every
+`HeartbeatInterval` (default five seconds). A runner with a health URL is unavailable
+until its first successful check; three consecutive failures release its sessions.
 
-Discovery at `GET /discovery` lists available runners. Off-chain operation
-accepts quoted runner prices but advertises free service. Enable the payment
-settings below to charge clients.
-
-The orchestrator advertises its own runners. Multiple orchestrators can
-be aggregated with a standalone [discovery service](discovery.md).
+`GET /discovery` lists this orchestrator's available runners; aggregate multiple
+orchestrators with [discovery](discovery.md). Off-chain operation accepts quoted
+prices but advertises free service. Enable payments below to charge clients.
 
 ## Allow local and private destinations
 
-Runner forwarding, callback-created session proxies, and static health checks
-have separate [destination grants](configuration.md#destination-grants). Use
-the corresponding setting to allow connections to local or private addresses:
+Use separate [destination grants](configuration.md#destination-grants) for local
+or private connections:
 
 | Setting | Permits private destinations for |
 | --- | --- |
@@ -83,9 +75,9 @@ its HTTPS address. The separate metrics listener must remain on loopback; see
 
 ## Sessions and proxies
 
-Each session keeps its reserved price and paid status. Later runner heartbeats or
-exchange-rate updates affect new sessions. Every release immediately frees
-capacity, revokes the session token, and removes session channels and proxies.
+Each session keeps its reserved price and paid status; heartbeat and exchange-rate
+updates affect new sessions. Releasing a session immediately frees capacity,
+revokes its token, and removes its channels and proxies.
 A runner stop gives in-flight HTTP, SSE, and WebSocket requests up to one second
 to finish; all other releases cancel them immediately. This applies to both
 persistent and single-shot sessions.
@@ -145,10 +137,7 @@ The registry accepts up to 256 runners and 10,000 sessions, with 25 generated
 proxies per session. Control requests have 64 admission slots and a five-second
 body deadline. Streaming requests have 256 separate slots.
 
-The session channel API checks a 1,024-entry channel quota with 256 entries
-reserved for runner controls. This is not a global Trickle memory limit.
-Trickle retains five segments per channel and limits each segment to 10 MB
-(10,000,000 bytes). There is no global byte cap or rolling window that allows a
-segment to exceed that limit. Size memory for the channels and segments in use.
-See the [protocol reference](../trickle/README.md) for missing-segment and
-streaming behavior.
+The session channel quota is 1,024 entries, with 256 reserved for runner controls.
+Trickle retains five segments per channel, each capped at 10 MB (10,000,000 bytes).
+There is no global byte cap; size memory for active channels and segments. See
+the [protocol reference](../trickle/README.md) for streaming behavior.

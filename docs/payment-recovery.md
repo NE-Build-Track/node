@@ -1,32 +1,80 @@
 # Payment state and transaction recovery
 
-The orchestrator database contains winning ticket signatures and the recipient
-randomness needed to redeem those winners. Keep it owner-only and backed up.
-Payment parameters, authentication keys, session balances, and ticket nonce
-replay guards are not persisted. Restarting rotates the keys and requires new
-paid sessions; stored winning tickets remain redeemable.
+SQLite preserves winning tickets and redemption transactions for
+[paid orchestrators](orchestrator.md#enable-payments), and accounting events for
+[Kafka-enabled signers](signer.md#kafka-accounting-and-budgets). Orchestrator
+sessions, payment parameters, balances, and replay guards are process-local;
+restarts rotate temporary keys and start fresh sessions. Stored winners remain
+redeemable. Also start fresh sessions after restoring recipient state or
+migrating legacy signed state.
 
-Clients carry the signer's signed payment state, which is a bearer credential
-while authorization is cached. When Kafka is enabled, each signer also owns a
-durable accounting-event outbox. Back up that outbox and the clearinghouse's
-accounting state independently. Start fresh client sessions after restoring
-recipient state or migrating from legacy signed state.
+## Back up SQLite
 
-See [orchestrator setup](orchestrator.md#enable-payments) and
-[signer setup](signer.md#kafka-accounting-and-budgets) for configuration.
+Run as the service owner. Use a persistent, owner-only directory (`0700`) and
+keep databases and WAL/SHM sidecars owner-only. The orchestrator database contains
+ticket signatures and redemption randomness; signer sidecars can contain
+accounting payloads. Signer startup rejects permissive or nonregular files.
+
+With the `sqlite3` CLI, back up either database while it is running. Set `db` to
+the actual `RedeemerDB` or `Kafka.OutboxDB` path:
+
+```sh
+(
+  set -eu
+  umask 077
+  db="$HOME/.lpData/arbitrum-one-mainnet/orchestrator/payments.sqlite"
+  test -f "$db"
+  backup_dir=$(mktemp -d "$HOME/livepeer-backup.XXXXXX")
+  sqlite3 "$db" ".timeout 5000" ".backup '$backup_dir/state.sqlite'"
+  test "$(sqlite3 "$backup_dir/state.sqlite" 'PRAGMA integrity_check;')" = ok
+  printf 'Backup: %s\n' "$backup_dir/state.sqlite"
+)
+```
+
+The backup API includes committed WAL contents; no sidecar copies are needed.
+For a file copy instead, stop the service and copy the database plus any WAL/SHM
+files together. Preserve ownership and permissions on restore. Back up the
+clearinghouse's accounting state independently of each signer's outbox.
+
+## Upgrades and rollback
+
+Keep the previous executable and config. [Install](../README.md#install) the new
+bundle in a separate directory, stop the affected service through its supervisor
+(Ctrl-C for foreground examples), wait for exit, and back up its current state.
+Startup applies pending migrations; inspect them before starting. This example
+uses an unchanged config and a paid orchestrator:
+
+```sh
+previous="$HOME/.local/share/livepeer/v1.0.4/bin/livepeer"
+candidate="$HOME/.local/share/livepeer/v1.0.5/bin/livepeer"
+config=/etc/livepeer/orchestrator.toml
+"$candidate" orchestrator migrate --config "$config" status &&
+  "$candidate" orchestrator --config "$config"
+```
+
+Check [probes](configuration.md#local-storage-and-probes), discovery, and a
+representative application/payment request. To roll back, stop the candidate,
+then check the previous binary against the **current** database:
+
+```sh
+"$previous" orchestrator migrate --config "$config" status &&
+  "$previous" orchestrator --config "$config"
+```
+
+Use `signer` and its config for an enabled outbox; omit migration checks for
+off-chain orchestrators or signers without Kafka. Restore the previous config
+if it changed, keeping network/database paths consistent. Check release notes:
+migration status verifies history, not all application compatibility. Unknown
+versions or changed migration checksums block downgrade. `migrate down` destroys
+data, including payment/accounting tables in the initial migrations. If downgrade
+is incompatible, retain the latest state for a compatible fix; restoring an old
+snapshot can lose events, winners, and transaction identities.
 
 ## Signer accounting recovery
 
-Keep `Kafka.OutboxDB` on persistent local storage, with one file per signer replica.
-Missing parent directories are created at startup. New files have mode 0600;
-existing files must be owner-only regular files. SQLite uses WAL and FULL synchronous
-commits. Back up with SQLite's backup API or stop the signer before copying the database
-and any WAL/SHM files. Monitor both pending payload bytes and actual disk usage.
-
-Use a dedicated owner-only directory (mode 0700) and preserve owner-only
-permissions on the database, `-wal`, and `-shm` files during backup and restore.
-Startup rejects nonregular or permissive database and sidecar files. The WAL
-can contain accounting payloads.
+Keep `Kafka.OutboxDB` on persistent local storage, one file per replica. It uses
+WAL and FULL synchronous commits; new files are `0600`. Monitor pending payload
+bytes and actual disk use.
 
 Restart with the same signer key, Kafka broker, topic and outbox path. Pending events
 resume automatically with their original IDs and exact payloads. A nonempty outbox
@@ -35,11 +83,10 @@ settings; credential rotation does not change its destination binding. Broker
 addresses learned from Kafka metadata can change without changing the bootstrap
 configuration. Never delete pending rows or replace the outbox to clear an outage.
 
-Only acknowledged events are removed. A crash after Kafka accepts a batch but before
-local deletion causes replay; the consumer must deduplicate event IDs. A partial or
-uncertain write retains the entire batch. The outbox is a delivery queue, not an audit
-archive: acknowledged payloads are deleted. Restoring a backup can replay old events
-and omit events created after that backup, so preserve the latest outbox during rollback.
+Only acknowledged events are removed. A crash before local deletion, or a partial
+or uncertain write, replays the batch; consumers must deduplicate event IDs.
+The outbox is a delivery queue, not an audit archive. Restoring a backup can replay
+old events and omit newer ones, so preserve the latest outbox during rollback.
 
 Kafka outages allow signing to continue until the outbox runs out of capacity. Failed
 local persistence returns 503 without payment credentials. Events are saved before the
@@ -102,13 +149,11 @@ session activity current. Expiry is monotonic within a recipient lifetime so
 a backward chain observation cannot revive parameters after their replay guards
 are removed. Auth-token refresh never resets nonce tracking. Winning tickets
 and uncertain transactions are retained for audit/reconciliation, so back up
-and monitor database disk use independently of these control-state quotas.
+and monitor database disk use independently of these quotas.
 
 Redemption planning uses geth's dynamic-fee selection and requires a base fee
 in the RPC header; a missing base fee leaves the ticket queued with an error.
 `RedeemerMaxFeePerGas` optionally caps the fee in wei per gas; a plan above
 that ceiling remains queued without signing or broadcasting. Prepared and
-submitted identities reserve their nonces, including after restart. Keep the
-redemption key exclusive to this database/worker; local nonce tracking does not
-coordinate another process using the same key. Explicit retry always resends
-the stored transaction without changing its fees.
+submitted identities reserve their nonces across restarts. Explicit retry
+resends the stored transaction without changing its fees.

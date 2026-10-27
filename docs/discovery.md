@@ -7,13 +7,12 @@ Copy the [configuration example](../configs/discovery/config.example.toml), set
 `Nodes` to your source base URLs, and run:
 
 ```sh
-bin/livepeer discovery --config /etc/livepeer/discovery.toml
+livepeer discovery --config /etc/livepeer/discovery.toml
 ```
 
-The standalone `bin/livepeer-discovery` accepts the same arguments.
-Configuration follows the [shared conventions](configuration.md), with the
-`LIVEPEER_DISCOVERY_` environment prefix and default directory
-`~/.lpData/offchain/discovery`. `--print-config` prints the effective TOML settings.
+`livepeer-discovery` accepts the same arguments. See
+[shared configuration](configuration.md) for environment variables, paths, and
+`--print-config`; the default directory is `~/.lpData/offchain/discovery`.
 
 ## Sources and cache
 
@@ -29,14 +28,11 @@ including when empty. Failures retain the cached inventory and last successful
 query time until `MaxFailedRefreshes` consecutive failures (default `6`). Set `0`
 to evict on the first failure. Polling continues after eviction.
 
-Keep the source topology acyclic. For example, if A queries an orchestrator and
-B, while B queries A, both discovery services can keep circulating a runner
-after its orchestrator withdraws it or goes offline. Peer queries still succeed,
-so failure-based eviction does not remove those copies; `observed_at` is preserved
-but has no age limit. This also applies to longer cycles and self-references.
-Have discovery services query orchestrators directly, or arrange aggregation in
-one direction with no path back to an earlier collector. Advertised node metadata
-does not create these connections; only configured `Nodes` are queried.
+Keep configured `Nodes` acyclic, including no self-references. If A queries an
+orchestrator and B, while B queries A, peers can circulate a withdrawn runner
+indefinitely: peer queries succeed and preserved `observed_at` has no age limit.
+Query orchestrators directly or aggregate in one direction. Advertised node
+metadata creates no connections.
 
 ## HTTP and advertising
 

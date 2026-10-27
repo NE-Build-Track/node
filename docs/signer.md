@@ -1,23 +1,8 @@
 # Remote signer
 
-The remote signer authorizes payments for work on the Livepeer network. It
-holds an Ethereum key and signs payment tickets on behalf of clients, so an
-application can pay for work without managing private keys or connecting to
-Ethereum itself.
-
-Running the signer as a separate service keeps keys out of the application and
-media processing path. It also lets a payment operator manage funding, price
-limits, and authorization independently of the applications using the network.
-Clients can run in browsers, on mobile devices, or in backend services while
-payment signing stays with the signer.
-
-The signer can also provide **discovery**: finding orchestrators that offer the
-application a client wants to run, along with their available runners and
-prices. Runners execute the work; orchestrators make those runners available
-to clients and collect payment.
-
-At a high level, the client uses the signer to find work providers and arrange
-payment, then sends its application requests to the chosen orchestrator:
+The signer holds an Ethereum key, authorizes and signs client payments, and
+discovers orchestrators and their runners. Clients need neither private keys
+nor RPC access; application traffic goes directly to the orchestrator:
 
 ```mermaid
 sequenceDiagram
@@ -26,15 +11,12 @@ sequenceDiagram
   participant Orchestrator
   opt Find a runner through discovery
     Client->>Signer: Find runners for an application
-    Signer->>Orchestrator: Query available runners and prices
-    Signer-->>Client: Matching runners, prices, and URLs
+    Signer-->>Client: Cached matching runners, prices, and URLs
   end
   Client->>Orchestrator: Request work
   Orchestrator-->>Client: Payment requirements
   Client->>Signer: Request payment
-  Note over Signer: Check limits and draft payment
-  Note over Signer: Authorize new payment state
-  Note over Signer: Sign payment and record for accounting
+  Note over Signer: Check limits, authorize, sign, and record accounting
   Signer-->>Client: Signed payment
   Client->>Orchestrator: Submit payment and use the application
 ```
@@ -57,13 +39,11 @@ defaults are for Arbitrum mainnet; override them for another chain. See
 Before making payments, fund the signer's account with both a TicketBroker
 deposit and reserve using the [chain CLI](chain.md).
 
-Start the signer:
+Start the signer; check readiness from another terminal:
 
 ```sh
-bin/livepeer signer --config /etc/livepeer/signer.toml
+livepeer signer --config /etc/livepeer/signer.toml
 ```
-
-Check readiness from another terminal:
 
 ```sh
 curl -fsS http://127.0.0.1:8938/readyz
@@ -74,10 +54,6 @@ that address. Keep it on a private network or behind an authenticated proxy,
 and configure TLS termination at the proxy.
 
 ## Configure discovery
-
-Discovery helps a client choose where to send work. A client can ask which
-orchestrators have runners for a particular application or GPU, inspect their
-advertised prices and capacity, and use a returned runner URL to start work.
 
 Set `Orchestrators` to orchestrator or standalone [discovery](discovery.md)
 base URLs to query. Both expose the same inventory API. Local or private sources
@@ -95,29 +71,17 @@ the last inventory until `DiscoveryMaxFailedRefreshes` consecutive failures
 (default `6`, nonnegative) remove it; `0` evicts on the first failure. Recovered
 sources reappear on subsequent polls.
 
-Query the signer to find runners:
+Query by application and GPU; omit either filter to broaden the results:
 
 ```sh
-# List all advertised runners
-curl -fsS 'http://127.0.0.1:8937/discover-orchestrators'
-
-# Find runners for an application
-curl -fsS 'http://127.0.0.1:8937/discover-orchestrators?app=example'
-
-# Also require a particular GPU name
 curl -fsS 'http://127.0.0.1:8937/discover-orchestrators?app=example&gpu=H100'
 ```
 
-Results include the orchestrator service URL and each matching runner's
-application, URL, mode, capacity, GPU information when available, and advertised
-price. Both filters must match when `app` and `gpu` are supplied together.
-
-Discovery reports what the sources advertise. Price limits are checked when
-the signer generates a payment, so an advertised runner may still exceed your
-configured limit. Finding a runner also does not reserve its capacity; the
-client must request a session or submit work at the returned URL. See the
-[discovery reference](http-api.md#discovery-filters-and-results) for result
-fields and filtering details.
+Results describe matching runners, prices, capacity, and application URLs.
+Discovery neither reserves capacity nor applies payment ceilings; clients must
+request work, and signing enforces price limits. See the
+[discovery reference](http-api.md#discovery-filters-and-results) for fields and
+filter rules.
 
 ## Orchestrator discovery webhook
 
@@ -136,34 +100,21 @@ GET at the webhook URL returns `[{"address":"https://orch.example.com/discovery"
 Addresses are complete HTTP(S) discovery URLs without credentials, queries, or
 fragments. Invalid addresses and extra fields are ignored.
 
-The webhook has a three-second timeout and 1 MiB response limit; redirects
-are rejected.
-
-The signer fetches at startup and periodically (positive interval, default `5m`).
-Until the first successful list, discovery requests also trigger or await a fetch;
-failures return 503. Later requests use the cached list without waiting for refreshes.
-On refresh failure, the last cached list is used. A successful empty response clears it.
-
-Sources returned by the webhook use the inventory polling settings above.
+Fetches run at startup and every positive `OrchestratorWebhookRefreshInterval`
+(default `5m`), with a three-second timeout, 1 MiB limit, and no redirects.
+Before the first successful list, discovery requests trigger or await a fetch;
+failures return 503. Later requests use the cache during refreshes and failures;
+a successful empty response clears it. Returned sources use the inventory
+polling settings above.
 
 ## Connect a client
 
-Configure the client with the signer's base URL, such as
-`https://signer.example.com`, and the credentials required by your authenticated
-proxy. Include that authentication on every request to the signer. The client
-needs network access to both the signer and the orchestrator it will use.
-
-The client can discover runners through the signer or use a known runner URL.
-When the orchestrator requests payment, the client passes its payment
-requirements to the signer and submits the resulting signed payment to the
-orchestrator. Application traffic goes to the orchestrator; the signer handles
-payment requests separately.
-
-For a client integration, follow the [signer HTTP API](http-api.md#remote-signer-http)
-for request and response formats. Clients must retain the signed payment state
-returned by the signer and pass it unchanged on subsequent payment calls for
-the same session. The [SDK integration fixtures](development.md#sdk-integration-fixtures)
-document the client versions and flows tested with this node.
+Configure the signer's base URL and proxy credentials; authenticate every signer
+request. Clients need access to both signer and orchestrator, found through
+discovery or a known runner URL. Follow the
+[signer HTTP API](http-api.md#remote-signer-http), retaining returned signed state
+unchanged for subsequent payments in the same session. The
+[SDK fixtures](development.md#sdk-integration-fixtures) list tested versions and flows.
 
 ## Set payment limits
 
@@ -190,20 +141,13 @@ retries can generate separate payments.
 
 ## Authorization
 
-An optional authorization webhook lets your service decide who may spend from
-the signer's account and under what conditions. For example, it can reject a
-payment when a customer's budget is exhausted or apply a customer-specific
-price ceiling.
-
-Set `AuthWebhookFile` to a file containing the webhook URL. If the webhook
-requires authentication, set `AuthWebhookHeadersFile` to a file containing
-comma-separated headers such as `Authorization: Bearer credential`.
-Omit the webhook settings to disable it.
-
-The signer sends the webhook the original client headers and proposed payment
-state. It returns payment credentials to the client only after approval. See
-the [webhook reference](http-api.md#authorization-webhook) for request examples,
-approval and rejection responses, and optional price ceilings.
+Use an authorization webhook to enforce caller budgets and price ceilings.
+Set `AuthWebhookFile` to a URL file and, for authentication,
+`AuthWebhookHeadersFile` to a comma-separated header file, such as
+`Authorization: Bearer credential`. Omit these settings to disable the webhook.
+The signer sends client headers and proposed payment state and returns payment
+credentials only after approval. See the
+[webhook reference](http-api.md#authorization-webhook) for requests and decisions.
 
 Omit `expiry` or return zero to authorize every payment. A future Unix timestamp
 caches approval and its price ceiling until expiry, delaying revocation and
@@ -213,12 +157,8 @@ A proxy must authenticate requests and overwrite untrusted `Signer-` headers.
 
 ## Kafka accounting and budgets
 
-The signer can publish signing events to Kafka so an accounting service can
-track payments. For a clearinghouse that uses those events to enforce budgets,
-configure Kafka together with the authorization webhook.
-
-Add `[Kafka]` with a bootstrap broker and topic. `OutboxDB` stores events waiting
-for delivery; its [default directory](configuration.md) is created automatically:
+Configure Kafka with the authorization webhook when a clearinghouse uses signing
+events to enforce budgets. `[Kafka]` requires a bootstrap broker and topic:
 
 ```toml
 [Kafka]
@@ -229,30 +169,56 @@ PasswordFile = "/run/secrets/kafka-password"
 OutboxDB = "/var/lib/livepeer/signer-events.sqlite"
 ```
 
-Credentials enable SASL/SCRAM-SHA-512 by default. Set the broker's port explicitly
-and choose `AuthMethod` to match its listener. Omit all Kafka settings to disable
-accounting. Give each replica its own outbox.
+Settings also accept `--kafka-*` flags and `LIVEPEER_SIGNER_KAFKA_*` variables.
+Any Kafka setting enables accounting; omit all to disable it. `Broker` accepts
+one `host[:port]` (bracket IPv6): TLS with system trust by default, `kafkas://`
+for TLS or `kafka://` for plaintext. Credentials, paths, queries, and fragments
+are rejected. Advertised brokers must use the same transport and authentication.
 
-Events are persisted before the payment response and delivered at least once;
-consumers must deduplicate event IDs. Separate signing requests produce separate
-events, including requests whose responses are interrupted. Accounting lag can
-allow a budget to be exceeded before authorization stops further payment.
+Paired username/password secrets enable SASL; use files or
+`LIVEPEER_SIGNER_KAFKA_USERNAME` / `LIVEPEER_SIGNER_KAFKA_PASSWORD`.
+`AuthMethod` accepts `plain`, `scram-sha-256`, or `scram-sha-512` (default).
+Without credentials SASL is disabled. Set the port explicitly or use these defaults:
+
+| Connection | Port |
+| --- | --- |
+| Plaintext without SASL | 9092 |
+| TLS without SASL | 9093 |
+| SASL/SCRAM, with or without TLS | 9096 |
+| SASL/PLAIN, with or without TLS | 9094 |
+
+Give each replica its own durable outbox. Events are persisted before payment
+responses and delivered at least once; consumers must deduplicate IDs. Separate
+signing requests produce separate events, even if responses are interrupted.
+Accounting lag can allow budgets to be exceeded before authorization stops
+payment. See [event formats and limits](http-api.md#accounting-events) and
+[backup/recovery](payment-recovery.md#signer-accounting-recovery).
 
 ## Readiness and monitoring
 
-Use the metrics listener (default `127.0.0.1:8938`) for `/healthz`, `/readyz`,
-and `/metrics`.
-Readiness checks chain access, payer funds, exchange-rate freshness, and enabled
-outbox storage. Monitor pending events, oldest event age, publish errors, and
-filesystem space. Kafka connectivity alone does not determine readiness.
+Use the metrics listener (default `127.0.0.1:8938`):
+
+```sh
+curl -fsS http://127.0.0.1:8938/healthz
+curl -fsS http://127.0.0.1:8938/metrics
+```
+
+`/healthz` checks liveness. `/readyz` requires chain access, positive deposit and
+total reserve, no withdrawal scheduled at or before the next round, a fresh
+exchange rate, and healthy enabled outbox storage with capacity. Kafka
+connectivity alone does not affect readiness. Recipient-specific claimable
+reserve is checked during payment generation.
+
+Monitor backlog, errors, and filesystem space. `/metrics` exposes:
+
+- `livepeer_signer_up`
+- `livepeer_signer_kafka_pending_events`
+- `livepeer_signer_kafka_pending_bytes`
+- `livepeer_signer_kafka_oldest_event_age_seconds`
+- `livepeer_signer_kafka_outbox_healthy`
+- `livepeer_signer_kafka_publish_errors_total`
+- `livepeer_signer_kafka_enqueue_errors_total`
+- `livepeer_signer_kafka_storage_errors_total`
 
 Replicas with the same key and authorization configuration can continue
 client-held signed state. Keep a separate durable outbox for each replica.
-
-## Reference
-
-- [HTTP API](http-api.md#remote-signer-http): endpoints, fields, discovery filters, and payment limits.
-- [Authorization webhook](http-api.md#authorization-webhook): decision fields and failure behavior.
-- [Accounting events](http-api.md#accounting-events): delivery limits and metrics.
-- [Configuration example](../configs/signer/config.example.toml): settings, defaults, and Kafka options.
-- [Payment recovery](payment-recovery.md#signer-accounting-recovery): backup, restart, and backlog handling.

@@ -1,16 +1,18 @@
 # Configuration and secrets
 
-Services read TOML (`.toml`) or JSON (`.json`). Unknown keys are rejected;
-migration and recovery commands read needed settings and ignore unrelated keys.
-Use the [orchestrator](../configs/orchestrator/config.example.toml),
+Services accept TOML or JSON and reject unknown keys. Migration and recovery
+commands read only their relevant settings. Use the
+[orchestrator](../configs/orchestrator/config.example.toml),
 [signer](../configs/signer/config.example.toml),
 [discovery](../configs/discovery/config.example.toml), and
 [chain](../configs/chain/config.example.toml) examples as starting points.
 
-Configuration precedence is **CLI > environment > config > default**. Select an
-explicit file with `--config FILE` or the component's `CONFIG` environment
-variable; the flag wins. An explicit config can set both `Network` and `DataDir`.
-`--config=""` disables discovery. Empty environment values are ignored.
+## Select configuration and storage
+
+Precedence is **CLI > environment > config > default**; empty environment values
+are ignored. Select a file with `--config FILE` or the component's `CONFIG`
+environment variable. An explicit config can set `Network` and `DataDir`.
+`--config=""` disables config discovery.
 
 `Network` defaults to `arbitrum-one-mainnet` for chain, signer, and the
 orchestrator's `redemptions` and `migrate` commands. The orchestrator service
@@ -19,26 +21,22 @@ defaults. Custom networks require explicit chain and Controller settings.
 Signers and paid orchestrators also need a feed or fixed conversion rate.
 Paid orchestrators must select an on-chain network. RPC chain IDs are checked.
 
-By default, component config and storage use `~/.lpData/<network>/<component>`;
-accounts use the shared `~/.lpData/<network>/keystore`. Network names must be
-nonempty directory names, excluding `.` and `..`.
+Config and storage default to `~/.lpData/<network>/<component>`; accounts use
+`~/.lpData/<network>/keystore`. Explicit `DataDir` values are used directly and
+move accounts to `<DataDir>/keystore`, even if the value matches the default.
+Database filenames default to `payments.sqlite` (orchestrator) and `events.sqlite`
+(signer). Network names must be nonempty directory names other than `.` or `..`.
 
-A supplied `DataDir` is used directly, even when it equals the calculated default.
-Discovery looks for `config.toml` there; database defaults are `payments.sqlite`
-(orchestrator) and `events.sqlite` (signer). Accounts use `<DataDir>/keystore`.
+Without `--config`, commands load `<DataDir>/config.toml` if present. That file
+cannot set `DataDir`; its `Network` must match the flag/environment/default.
+A paid orchestrator using config discovery therefore needs
+`--network arbitrum-one-mainnet`. Explicit configs must exist and determine the
+network before default directories are calculated.
 
-Explicit configs determine the effective network before default directories are
-calculated. Without `--config`, each command loads `config.toml` from its data
-directory if present. That file can't set `DataDir`, and its `Network` must match
-the network selected by flag, environment or default. For example, a paid
-orchestrator using discovery needs `--network arbitrum-one-mainnet`.
-Missing discovered configs are skipped; explicit configs must exist, even when
-their path matches the discovery path.
-
-Relative config and input paths from CLI/environment use the working directory.
-Input paths in config files use that file's directory. Relative database paths
-use the effective datadir. Absolute paths stay unchanged. These rules also apply
-to account creation, migrations, and recovery commands.
+Relative input paths use the working directory for CLI/environment values and
+the config file's directory for file values. Relative database paths use the
+effective datadir; absolute paths stay unchanged. This includes account,
+migration, and recovery commands.
 
 ## Names and environment variables
 
@@ -53,20 +51,16 @@ the component prefix and underscores:
 | Signer | `LIVEPEER_SIGNER_` | `LIVEPEER_SIGNER_RPC_URL` |
 | Chain | `LIVEPEER_CHAIN_` | `LIVEPEER_CHAIN_RPC_URL` |
 
-Run `bin/livepeer COMPONENT --help` for flags and defaults. The orchestrator,
-discovery, and chain support `--print-config` to print configuration
-with secrets omitted:
+Run `livepeer COMPONENT --help` for flags and defaults. Orchestrator, discovery,
+and chain support `--print-config`:
 
 ```sh
-bin/livepeer orchestrator --config /etc/livepeer/orchestrator.toml --print-config
-bin/livepeer chain --config /etc/livepeer/chain.toml --print-config
-bin/livepeer discovery --config /etc/livepeer/discovery.toml --print-config
+livepeer orchestrator --config /etc/livepeer/orchestrator.toml --print-config
 ```
 
-Printed configuration also omits secret file paths and the static runner file
-path. Chain action inputs, transaction switches, `--output`, and `--print-config`
-must be supplied on the command line. Orchestrator `--print-config` and
-redemption `--submit` are also command-line-only controls.
+Output omits secrets, secret file paths, and the static runner file path.
+Chain action inputs, transaction switches, `--output`, and `--print-config` are
+CLI-only, as are orchestrator `--print-config` and redemption `--submit`.
 
 ## Destination grants
 
@@ -79,11 +73,10 @@ Grants are checked against each resolved IP at connection time.
 
 ## Credential files
 
-RPC URLs, bootstrap credentials, keystore passwords, webhook URLs and headers,
-and Kafka credentials are secrets. Supply each through its file
-option or direct environment variable. Direct secret flags and TOML values are
-rejected, and a direct environment secret cannot be set together with its file
-option.
+Supply RPC URLs, bootstrap credentials, keystore passwords, webhook URLs/headers,
+and Kafka credentials through file options or direct environment variables.
+Direct secret flags and TOML values are rejected. An environment secret cannot
+be combined with its file option.
 
 Credential files are read as exact bytes, including trailing newlines. For
 example, create a bootstrap credential without a newline:
@@ -93,41 +86,29 @@ umask 077
 openssl rand -hex 32 | tr -d '\n' > runner-bootstrap.secret
 ```
 
-Set `BootstrapSecretFile` to that file's absolute path and give the same
-credential to runners during initial registration. Secret-manager mounts must
-also contain exactly the intended bytes. URL credential files must contain a
-valid URL without a trailing newline.
+Set `BootstrapSecretFile` to its absolute path and use the same credential for
+initial runner registration. Secret-manager mounts must preserve exact bytes;
+URL files require a valid URL without a trailing newline.
 
 ## Ethereum keystores
 
-All three apps discover encrypted geth accounts in the shared network keystore
-when `DataDir` is absent, or `<DataDir>/keystore/` when it is supplied.
-A sole account is selected automatically. Use `--account` (`Account` in TOML) to
-select among accounts, or `--keystore-file` to select a file directly and bypass
-discovery.
+Chain, signer, and paid orchestrators discover encrypted geth accounts in the
+keystore directory described above. A sole account is selected automatically;
+use `Account` / `--account` to select among accounts or `KeystoreFile` /
+`--keystore-file` to bypass discovery.
 
-| Keystore TOML key | Password-file TOML key |
-| --- | --- |
-| `KeystoreFile` | `KeystorePasswordFile` |
-
-Signing requires the selected keystore's password.
-Supply the password in a file (`--keystore-password-file`) or an environment
-variable. Environment variables use the app prefix, such as
-`LIVEPEER_SIGNER_KEYSTORE_PASSWORD_FILE` for a password file or
-`LIVEPEER_SIGNER_KEYSTORE_PASSWORD` for the password itself. CLI values override
-environment values, which override TOML.
+Signing also requires `KeystorePasswordFile` / `--keystore-password-file` or an
+environment password. For signer, these are
+`LIVEPEER_SIGNER_KEYSTORE_PASSWORD_FILE` and `LIVEPEER_SIGNER_KEYSTORE_PASSWORD`.
 
 Keystore and password files must be regular files readable only by their owner;
 `0400` and `0600` are accepted. Secret-manager symlinks are accepted when their
-target files meet these requirements. Password files are read as exact bytes,
-including whitespace and trailing newlines. Supply the actual password without
-an unintended newline. To use a keystore without a password, supply an empty
-password file.
+target files meet these requirements. Password files follow the exact-byte
+rules above; supply an empty file for a keystore without a password.
 
-The signer requires a keystore and password at startup. The orchestrator requires
-both when payments are configured. The chain requires both for submissions and
-local signing. Changing the keystore or password requires a service restart, or
-a new chain invocation.
+Signer and paid orchestrators require these credentials at startup; chain needs
+them for submissions and local signing. Credential changes require a restart
+or a new chain invocation.
 
 The signer account is the payer, supplying the TicketBroker deposit and reserve.
 The orchestrator's keystore account signs redemptions and pays gas. Ticket payments
@@ -138,23 +119,19 @@ tracking.
 
 ### Prepare a keystore
 
-Create an encrypted account locally with the chain CLI. First prepare an
-owner-only password file in an existing directory:
+Create an account without RPC access; choose a password path in an existing directory:
 
 ```sh
 umask 077
 openssl rand -hex 32 | tr -d '\n' > /path/to/password
-bin/livepeer chain account create \
+livepeer chain account create \
   --keystore-password-file /path/to/password
 ```
 
-Creation requires no RPC or account address. It encrypts a freshly generated key
-with geth's standard scrypt settings and writes the keystore with `0600`
-permissions in the shared network keystore, or `<DataDir>/keystore/` when
-`DataDir` is supplied. An optional `--keystore-file` chooses a
-new file in an existing parent directory; existing paths are never overwritten. The
-command prints the new public address; add `--output json` for scripts. The
-password can also come from `LIVEPEER_CHAIN_KEYSTORE_PASSWORD`.
+The command uses geth's standard scrypt settings, saves the keystore with `0600`
+permissions, and prints its address (`--output json` for scripts).
+`--keystore-file` selects a new path in an existing parent directory; existing
+files are never overwritten. No account address is required.
 
 ## Local storage and probes
 

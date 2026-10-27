@@ -1,7 +1,7 @@
 # Documentation
 
-Start with the [local example](../README.md#run-a-local-example) to build the
-executables and send a request through an orchestrator.
+Start with [installation](../README.md#install) and the
+[local example](../README.md#run-a-local-example).
 
 ## Operating a node
 
@@ -12,7 +12,7 @@ executables and send a request through an orchestrator.
 | [Discovery](discovery.md) | Collect and advertise orchestrator inventories without local runners or payments. |
 | [Signer](signer.md) | Configure price limits, authorization, discovery, and Kafka accounting. |
 | [Chain commands](chain.md) | Inspect accounts, manage stake and funds, and submit transactions. |
-| [Payment recovery](payment-recovery.md) | Back up state, recover accounting events, and reconcile ticket redemptions. |
+| [Payment recovery](payment-recovery.md) | Back up state, upgrade or roll back, and recover accounting/redemption work. |
 
 ## Developing and integrating
 

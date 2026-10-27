@@ -1,9 +1,7 @@
 # Livepeer Node
 
-Livepeer Node contains services and command-line tools for the Livepeer network.
-It includes an orchestrator for Livepeer runners, standalone discovery,
-a remote signer for network payments and discovery filtering, and a protocol CLI
-for managing wallets, staking, earnings, funding, governance, and local signing.
+Livepeer Node provides runner orchestration, discovery, payment signing, and
+protocol commands for the Livepeer network.
 
 | Executable | Role |
 | --- | --- |
@@ -13,20 +11,33 @@ for managing wallets, staking, earnings, funding, governance, and local signing.
 | `livepeer-signer` | Signs identities and payments, discovers orchestrators, and optionally publishes accounting events. |
 | `livepeer-chain` | Inspects accounts and contracts, manages wallets, staking, earnings, funds, and governance, and signs files locally. |
 
-The orchestrator supports persistent and single-shot sessions, HTTP streaming,
-server-sent events (SSE), WebSockets, and Trickle channels. It can run locally
-without payments or use Ethereum payment tickets. The signer requires chain
-configuration.
+## Install
 
-## Build
-
-Install the Go version declared in [go.mod](go.mod) or newer, then run from the repository root:
+Linux releases include all executables and need no Go installation. This example
+uses the GitHub CLI, `tar`, and `sha256sum`; choose a release and architecture:
 
 ```sh
-make build
-bin/livepeer version
-bin/livepeer orchestrator --help
+set -eu
+version=v1.0.5
+arch=amd64 # or arm64
+release_dir="$HOME/.local/share/livepeer/$version"
+(
+  mkdir -p "$release_dir"
+  cd "$release_dir"
+  gh release download "$version" --repo livepeer/node \
+    --pattern "livepeer-$version-linux-$arch.tar.gz" --pattern SHA256SUMS
+  sha256sum --check --ignore-missing SHA256SUMS
+  tar -xzf "livepeer-$version-linux-$arch.tar.gz" --strip-components=1
+  sha256sum --check SHA256SUMS
+)
+export PATH="$release_dir/bin:$PATH"
+livepeer version
 ```
+
+Keep the executables together: `livepeer` dispatches to its sibling components.
+Persist the PATH setting in your shell or use absolute executable paths in your
+service configuration. For other platforms or source builds, see
+[development](docs/development.md).
 
 ## Run a local example
 
@@ -41,10 +52,10 @@ while true; do
 done
 ```
 
-In a second terminal, from the repository root, start the orchestrator:
+In a second terminal, from the repository root with `livepeer` on PATH, run:
 
 ```sh
-bin/livepeer orchestrator --config configs/orchestrator/local.example.toml
+livepeer orchestrator --config configs/orchestrator/local.example.toml
 ```
 
 In a third terminal, check readiness, discovery, and forwarding. Allow up to
@@ -62,28 +73,11 @@ runner and orchestrator with Ctrl-C in their terminals.
 
 ## Configure a deployment
 
-Use [configuration and secrets](docs/configuration.md) for credentials, encrypted
-Ethereum keystores and password files, and probe addresses. Then follow the
-component guides:
-
-- [Orchestrator](docs/orchestrator.md): dynamic/static runners, networking, TLS,
-  proxy URLs, limits, and payments.
-- [Discovery](docs/discovery.md): standalone inventory collection, caching, and peer advertising.
-- [Signer](docs/signer.md): chain access, price limits, authorization, and Kafka
-  accounting.
-- [Chain commands](docs/chain.md): inspecting accounts, previewing and submitting
-  transactions, and signing files locally.
-- [Payment recovery](docs/payment-recovery.md): backups, restart, and uncertain
-  transaction recovery.
-
-Chain state changes perform a dry run by default. Add `--submit` to broadcast
-and wait for successful inclusion. Use `--no-wait` for a single transaction
-without replacements. Trickle retains five segments per channel, with a 10 MB
-limit per segment and no global byte cap.
-
-For tests, SDK fixtures, and packaging, see [development](docs/development.md).
-The [documentation index](docs/README.md) links the operating guides and protocol
-references.
+Start with [configuration and secrets](docs/configuration.md), then choose a
+component guide from the [documentation index](docs/README.md). Use
+[payment recovery](docs/payment-recovery.md) for backups, upgrades, rollback, and
+transaction reconciliation; [development](docs/development.md) covers tests,
+SDK fixtures, and release packaging.
 
 Imported or adapted code retains its original MIT notice in
 [MIT notice](LICENSE).

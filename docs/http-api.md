@@ -28,13 +28,11 @@ See [orchestrator setup](orchestrator.md), [signer setup](signer.md), and
 SDK revisions, fixture setup, and compatibility test coverage are documented in
 [development](development.md#sdk-integration-fixtures).
 
-`RunnerServiceURL` can advertise a separate runner-facing base URL for the
-heartbeat `orchestrator` and orchestrator-to-runner (O2R) control channel,
-session callback header, and trickle
-`internal_url`. Public discovery, session, proxy and channel URLs use
-`ServiceURL`. The default generated proxy path is `/run/{proxy}`;
-`/proxy/{proxy}` remains an accepted alias. O2R channels send periodic
-`{"keep":"alive"}` messages while the runner is registered.
+Registration defaults capacity to one and trims/lowercases price units and
+currencies. See [public URLs](orchestrator.md#public-urls-and-tls) for
+`RunnerServiceURL`, and [sessions and proxies](orchestrator.md#sessions-and-proxies)
+for pricing, release behavior, and proxy routes. O2R channels send
+`{"keep":"alive"}` periodically while the runner is registered.
 
 ## Discovery HTTP
 
@@ -114,6 +112,9 @@ Success returns `payment`, `segCreds`, and `state`. Send the first two as the
 orchestrator's `Livepeer-Payment` and `Livepeer-Segment` headers. State is bound
 to the ticket recipient, application, payment type, and manifest ID.
 Earlier state can be replayed; HTTP retries can generate separate tickets.
+Parameter refresh preserves the state sequence and resets the ticket nonce for
+new randomness. Compatible signer replicas can continue client-held state;
+recipients reject duplicate tickets.
 
 Requests are limited to 1 MiB, with a five-second body deadline, a 30-second
 request deadline, and 64 concurrent requests. Oversized payment request bodies
@@ -150,12 +151,9 @@ the provenance of an arbitrary challenge.
 
 ### Authorization webhook
 
-To approve or reject payments, configure an authorization webhook. The signer
-sends it a `POST` with `Content-Type: application/json` before signing. The body
-contains `headers` (the client's request headers, with an array of values per
-name) and `state` (the proposed payment state). Use these to identify the caller
-and evaluate the payment against your policy. The ticket batch is not included.
-Example request, showing selected state fields:
+The [configured webhook](signer.md#authorization) receives a JSON `POST` before
+signing. Its body contains client `headers` (arrays of values) and proposed
+payment `state`, without the ticket batch. Example with selected state fields:
 
 ```json
 {
@@ -209,19 +207,7 @@ entries. Names are case-insensitive; repeated names retain multiple values.
 Quote an entire entry using CSV syntax when its value contains commas, for
 example `"X-List: a,b",Authorization: Bearer credential`.
 
-`pm/wire` retains only the consumed fields and original field numbers:
-`OrchestratorInfo` 1–4 and 6, `TicketParams` 1–7, `PriceInfo` 1–2,
-`AuthToken` 1–3, `TicketExpirationParams` 1–2, `Payment` 1–5, payer params
-1–2, and `SegData` 1, 3, 5 and 8. Other fields are skipped on decode.
-Binary fixtures produced by the pinned Python runner check the wire
-format in `pm/wire/wire_test.go`.
-
-## Lifecycle and response codes
-
-Registration defaults omitted capacity to one and normalizes price unit and
-currency whitespace and case. See [sessions and proxies](orchestrator.md#sessions-and-proxies)
-for session pricing and release behavior, and the [Trickle protocol](../trickle/README.md)
-for channel behavior.
+### Response codes
 
 | Signer status | Client action |
 | --- | --- |
@@ -234,18 +220,6 @@ for channel behavior.
 | 500 | Payment generation or signing failed, including payer funds/chain failures detected after precheck. |
 | 502 | Restore the authorization webhook or correct its response. |
 | 503 | Retry after payment dependencies, discovery sources, or accounting storage recover. |
-
-Healthy empty discovery returns HTTP 200 with `[]`. Rate and readiness policy
-are described in [the signer guide](signer.md). Signed state preserves its
-sequence through parameter refresh and resets the ticket nonce for new
-randomness. Replicas with the same key and webhook configuration can continue
-that state, but there is no server-side replay database: earlier state can be
-reused and retries can receive different tickets. Recipients reject duplicates.
-
-Signed state acts as a bearer credential during cached authorization. The
-webhook receives the proposed payment state; payment data is returned only
-after approval. See [authorization](signer.md#authorization) for identity and
-cache behavior.
 
 ## Accounting events
 
@@ -268,46 +242,17 @@ or exhausted capacity returns 503. Kafka outages allow signing while the outbox
 has capacity. See [recovery](payment-recovery.md#signer-accounting-recovery)
 for backups and replay after restart.
 
-The metrics listener (default `127.0.0.1:8938`) exposes:
-
-- `livepeer_signer_up`
-- `livepeer_signer_kafka_pending_events`
-- `livepeer_signer_kafka_pending_bytes`
-- `livepeer_signer_kafka_oldest_event_age_seconds`
-- `livepeer_signer_kafka_outbox_healthy`
-- `livepeer_signer_kafka_publish_errors_total`
-- `livepeer_signer_kafka_enqueue_errors_total`
-- `livepeer_signer_kafka_storage_errors_total`
-
-`/healthz` reports process liveness. `/readyz` requires chain/funds access, a
-positive deposit and total reserve, no withdrawal scheduled at or before the
-next round, a fresh rate, and healthy enabled outbox storage with capacity.
-Kafka connectivity alone does not make readiness fail. Recipient-specific
-claimable reserve is checked during payment generation.
-
-Kafka settings use `[Kafka]` in TOML, `--kafka-*` flags, and
-`LIVEPEER_SIGNER_KAFKA_*` environment variables. Supplying any setting enables
-accounting and requires `Broker` and `Topic`. A broker accepts one `host[:port]`
-(bracket IPv6), with TLS/system trust by default; `kafkas://` selects TLS and
-`kafka://` selects plaintext. Credentials, paths, queries, and fragments are
-rejected. Advertised cluster brokers must support the same transport and auth.
-
-Paired username/password secrets enable SASL; use files or
-`LIVEPEER_SIGNER_KAFKA_USERNAME` and `LIVEPEER_SIGNER_KAFKA_PASSWORD`.
-`AuthMethod` accepts `plain`, `scram-sha-256`, or `scram-sha-512` (default).
-Without credentials, SASL is disabled. An explicit port overrides these signer
-conventions:
-
-| Connection | Default port |
-| --- | --- |
-| Plaintext without SASL | 9092 |
-| TLS without SASL | 9093 |
-| SASL/SCRAM, with or without TLS | 9096 |
-| SASL/PLAIN, with or without TLS | 9094 |
+See signer [monitoring](signer.md#readiness-and-monitoring) and
+[Kafka configuration](signer.md#kafka-accounting-and-budgets).
 
 ## Codec checks
 
-The selected-field Protobuf decoder is compared with the generated runtime for
-merged message fields, unknown and wrong-wire fields, UTF-8, and bounds.
-Ticket nonces outside uint32 are rejected. See [development](development.md)
-for fixtures and test commands.
+`pm/wire` retains consumed fields with their original Protobuf numbers:
+`OrchestratorInfo` 1–4 and 6, `TicketParams` 1–7, `PriceInfo` 1–2,
+`AuthToken` 1–3, `TicketExpirationParams` 1–2, `Payment` 1–5, payer params
+1–2, and `SegData` 1, 3, 5 and 8. Other fields are skipped.
+
+Python fixtures in `pm/wire/wire_test.go` check binary compatibility. Differential
+tests compare the decoder with the generated runtime for merged messages,
+unknown/wrong-wire fields, UTF-8, and bounds. Nonces outside uint32 are rejected.
+See [development](development.md) for fixtures and test commands.

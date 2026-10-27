@@ -1,15 +1,17 @@
 # Development
 
-The minimum Go version is declared in [go.mod](../go.mod). CI and release metadata
-use that version; keep the digest-pinned Go builder in `docker/Dockerfile` aligned
-with it. Build all executables with:
+Install the Go version in [go.mod](../go.mod) or newer. From the repository root:
 
 ```sh
 make build
-bin/livepeer version
-bin/livepeer orchestrator --help
-bin/livepeer completion orchestrator bash
+export PATH="$PWD/bin:$PATH"
+livepeer version
+livepeer orchestrator --help
+livepeer completion orchestrator bash
 ```
+
+CI and release metadata use the declared Go version; keep the digest-pinned
+builder in `docker/Dockerfile` aligned with it.
 
 ## Releases
 
@@ -49,9 +51,9 @@ Integration tests use these pinned revisions:
 | Go: `livepeer/golang-runner` | `c3be5a14a91f8a3437133419becaced324d804fe` | `GO_RUNNER_SDK_DIR` |
 | Python: `livepeer/livepeer-python-gateway` | `76a1a1c58656ef2ad0c28542ea5f99086b76db69` | `PYTHON_RUNNER_SDK_DIR` |
 
-SDK tests always export the pinned revision, regardless of the checkout's branch
-or local edits, and fetch it into a temporary repository if it is missing locally.
-To provision fixtures in a temporary directory (requires Git, Python 3.12, and `uv`):
+Tests export the pinned committed trees, leaving development checkouts unchanged,
+and fetch missing revisions into a temporary repository. To provision fixtures
+(requires Git, Python 3.12, and `uv`):
 
 ```sh
 livepeer_fixture_dir=$(mktemp -d)
@@ -68,9 +70,8 @@ go test -race ./...
 
 Without explicit paths, tests look for sibling `golang-runner` and
 `python-runner` checkouts and the Python checkout's `.venv/bin/python`. SDK
-coverage can be skipped when the checkouts or dependencies are absent, so read
-the test logs before reporting a compatibility result. Both SDK fixtures use
-their pinned committed trees; development checkouts are left unchanged.
+coverage can be skipped when checkouts or dependencies are absent; check the
+logs before reporting compatibility.
 
 The fixtures cover persistent and single-shot sessions, proxy modes, discovery,
 runner callbacks, Trickle, and Python media/control round trips. Payment tests
