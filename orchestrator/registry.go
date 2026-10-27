@@ -384,6 +384,7 @@ func (r *Registry) Unregister(id, auth string) (int, error) {
 }
 
 type discoveryRunner struct {
+	RunnerID          string     `json:"runner_id"`
 	ObservedAt        string     `json:"observed_at"`
 	URL               string     `json:"url"`
 	App               string     `json:"app"`
@@ -414,7 +415,7 @@ func (r *Registry) Discovery() []discoveryEntry {
 			continue
 		}
 		available := max(0, item.Capacity-len(item.Sessions))
-		result = append(result, discoveryRunner{ObservedAt: observed, URL: r.discoveryURL(id, item), App: item.App, Version: item.Version, Metadata: item.Metadata, GPU: item.GPU, Mode: item.Mode, Capacity: item.Capacity, CapacityUsed: len(item.Sessions), CapacityAvailable: available, PriceInfo: item.PriceInfo})
+		result = append(result, discoveryRunner{RunnerID: id, ObservedAt: observed, URL: r.discoveryURL(id, item), App: item.App, Version: item.Version, Metadata: item.Metadata, GPU: item.GPU, Mode: item.Mode, Capacity: item.Capacity, CapacityUsed: len(item.Sessions), CapacityAvailable: available, PriceInfo: item.PriceInfo})
 	}
 	return []discoveryEntry{{Address: r.service, Runners: result}}
 }

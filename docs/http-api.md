@@ -54,7 +54,9 @@ with no `address`:
 ]
 ```
 
-Runner records also carry mode, capacity, prices, and optional metadata/GPU fields.
+Runner records also carry `runner_id` (the registered runner identity), mode, capacity,
+prices, and optional metadata/GPU fields. Consumers can bind admission to this identity
+without deriving it from the proxy URL or conflating it with the application name.
 Discovery preserves complete runner records. `nodes` lists successfully queried,
 non-evicted sources, and `queried_at` records each source's last successful query
 time. Empty node and runner lists are omitted. With neither to advertise, discovery

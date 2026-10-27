@@ -362,4 +362,9 @@ func TestRunnerGPUIsPreservedForPythonDiscovery(t *testing.T) {
 	require.Len(t, entries, 1)
 	require.Len(t, entries[0].Runners, 1)
 	require.Equal(t, "H100", entries[0].Runners[0].GPU.Name)
+	encoded, err := json.Marshal(entries[0].Runners[0])
+	require.NoError(t, err)
+	var record map[string]any
+	require.NoError(t, json.Unmarshal(encoded, &record))
+	require.Equal(t, "gpu-runner", record["runner_id"])
 }
