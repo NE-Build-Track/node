@@ -16,33 +16,32 @@ builder in `docker/Dockerfile` aligned with it.
 ## Releases
 
 Set the [VERSION](../VERSION) file to the next `MAJOR.MINOR.PATCH` number without
-a `v` prefix, leading zeroes, prerelease suffix, or build metadata. Commit it to
-`main`, then run **Create Release** from GitHub Actions.
-
-You can also run the release helper locally with the Git remote name:
+a `v` prefix, leading zeroes, prerelease suffix, or build metadata. Merge it to
+`main`, then run **Release** from GitHub Actions on `main`:
 
 ```sh
-./release.sh github
+gh workflow run release.yml --repo livepeer/node --ref main
 ```
 
-The helper creates and pushes a `vMAJOR.MINOR.PATCH` tag. Release tags cannot be
-updated or deleted, and published releases are immutable.
-The [Release workflow](../.github/workflows/release.yml) on GitHub publishes
-bundles after CI and packaging tests pass. Successful publication also starts
-Docker image publishing.
+The [Release workflow](../.github/workflows/release.yml) requires repository admin
+permission and uses the dispatch commit throughout CI, packaging, tagging,
+GitHub publication, and Docker publication.
 
-If **Create Release** creates the tag but fails to start **Release**, run:
+If a job fails, choose **Re-run failed jobs** in that same run within seven days,
+while the tested bundles and images are retained. Matching tags, incomplete
+drafts, and published stable releases with identical assets are safe to retry;
+conflicting tags or published assets fail without replacement. If artifacts
+have expired, rerun all jobs to rebuild before retrying publication.
 
-```sh
-gh workflow run release.yml --repo livepeer/node --ref vMAJOR.MINOR.PATCH -f publish=true
-```
-
-If **Release** or **Publish Docker** fails, choose **Re-run failed jobs** before
-its image artifacts expire.
+For tested snapshot bundles without publication, run
+[Build](../.github/workflows/build.yml) manually. Eligible PRs also build bundles;
+main pushes automatically test and publish snapshot Docker images, retained as
+workflow artifacts for one day.
 
 ## Checks
 
 ```sh
+bash .github/scripts/test-release.sh
 go test -race ./...
 go vet ./...
 go build ./...

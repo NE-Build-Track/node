@@ -1,11 +1,18 @@
 name: Publish Docker
 
-# Publish images triggered by release builds on main or version tags
 on:
-  workflow_run:
-    workflows: [Release]
-    branches: [main, 'v*']
-    types: [completed]
+  workflow_call:
+    inputs:
+      commit:
+        required: true
+        type: string
+      version:
+        required: true
+        type: string
+      target:
+        description: main or the release tag
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -15,57 +22,31 @@ defaults:
     shell: bash
 
 jobs:
-  images:
-    if: >-
-      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
-      (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) &&
-      github.event.workflow_run.head_repository.full_name == github.repository &&
-      github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-26.04
-    timeout-minutes: 5
-    permissions:
-      actions: read
-    outputs:
-      available: ${{ steps.images.outputs.available }}
-    steps:
-      - name: Check for tested images
-        id: images
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RUN_ID: ${{ github.event.workflow_run.id }}
-          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
-        run: |
-          count=$(gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" | \
-            jq '[.[].artifacts[].name | select(. == "docker-linux-amd64" or . == "docker-linux-arm64")] | unique | length')
-          if [[ "$count" == 2 ]]; then
-            echo 'available=true' >> "$GITHUB_OUTPUT"
-          elif [[ "$count" == 0 && "$SOURCE_EVENT" == workflow_dispatch ]]; then
-            echo 'available=false' >> "$GITHUB_OUTPUT"
-            echo 'Skipping Docker publication: packaging-only manual run.' >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'Expected tested images for both amd64 and arm64.' >&2
-            exit 1
-          fi
-
   publish:
-    needs: images
-    if: needs.images.outputs.available == 'true'
     runs-on: ubuntu-26.04
     environment: docker-publish
     timeout-minutes: 15
     permissions:
       contents: read
-      actions: read
       packages: write
     outputs:
       ghcr_digest: ${{ steps.publish.outputs.ghcr_digest }}
       dockerhub_digest: ${{ steps.publish.outputs.dockerhub_digest }}
     steps:
+      - &release_checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: inputs.target != 'main'
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - &authorize_release
+        name: Require current release administrators
+        if: inputs.target != 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./release.sh --authorize
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          github-token: ${{ github.token }}
-          run-id: ${{ github.event.workflow_run.id }}
           pattern: docker-linux-*
           path: images
           merge-multiple: true
@@ -85,8 +66,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
-          COMMIT: ${{ github.event.workflow_run.head_sha }}
-          REF_NAME: ${{ github.event.workflow_run.head_branch }}
+          COMMIT: ${{ inputs.commit }}
+          REF_NAME: ${{ inputs.target }}
+          VERSION: ${{ inputs.version }}
         run: |
           repository=$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
           ghcr_image="ghcr.io/$repository"
@@ -99,15 +81,14 @@ jobs:
             }
             test "$(gh api "repos/$REPOSITORY/commits/refs/tags/$REF_NAME" --jq .sha)" = "$COMMIT"
             # Release binaries embed a different version than main at the same commit.
+            test "$VERSION" = "$REF_NAME"
             tag="$REF_NAME-$tag"
           fi
           for arch in amd64 arm64; do
             docker load --input "images/docker-$arch.tar"
             test "$(docker image inspect --platform "linux/$arch" --format '{{.Os}}/{{.Architecture}}' "livepeer:test-$arch")" = "linux/$arch"
             test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "livepeer:test-$arch")" = "$COMMIT"
-            if [[ "$REF_NAME" != main ]]; then
-              test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "livepeer:test-$arch")" = "$REF_NAME"
-            fi
+            test "$(docker image inspect --platform "linux/$arch" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "livepeer:test-$arch")" = "$VERSION"
             for image in "$ghcr_image" "$dockerhub_image"; do
               docker tag "livepeer:test-$arch" "$image:$tag-$arch"
               docker push "$image:$tag-$arch"
@@ -160,13 +141,15 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           GHCR_DIGEST: ${{ needs.publish.outputs.ghcr_digest }}
           DOCKERHUB_DIGEST: ${{ needs.publish.outputs.dockerhub_digest }}
-          COMMIT: ${{ github.event.workflow_run.head_sha }}
+          COMMIT: ${{ inputs.commit }}
           PLATFORM: linux/${{ matrix.arch }}
+          VERSION: ${{ inputs.version }}
         run: |
           repository=$(printf '%s' "$REPOSITORY" | tr '[:upper:]' '[:lower:]')
           for reference in "ghcr.io/$repository@$GHCR_DIGEST" "docker.io/$repository@$DOCKERHUB_DIGEST"; do
             docker pull --platform "$PLATFORM" "$reference"
             version=$(docker image inspect --platform "$PLATFORM" --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$reference")
+            test "$version" = "$VERSION"
             test "$(docker run --rm --network none --platform "$PLATFORM" "$reference" version)" = "livepeer $version ($COMMIT)"
           done
 
@@ -180,10 +163,12 @@ jobs:
       packages: write
     # Keep pending promotions: an older build may finish after the newest one.
     concurrency:
-      group: docker-${{ github.event.workflow_run.head_branch }}-promotion
+      group: docker-${{ inputs.target }}-promotion
       cancel-in-progress: false
       queue: max
     steps:
+      - *release_checkout
+      - *authorize_release
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -199,8 +184,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          COMMIT: ${{ github.event.workflow_run.head_sha }}
-          REF_NAME: ${{ github.event.workflow_run.head_branch }}
+          COMMIT: ${{ inputs.commit }}
+          REF_NAME: ${{ inputs.target }}
           GHCR_DIGEST: ${{ needs.publish.outputs.ghcr_digest }}
           DOCKERHUB_DIGEST: ${{ needs.publish.outputs.dockerhub_digest }}
         run: |

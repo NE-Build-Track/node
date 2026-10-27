@@ -1,0 +1,180 @@
+name: Package
+
+on:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+      bundles:
+        type: boolean
+        default: true
+      export_images:
+        type: boolean
+        default: false
+    outputs:
+      version:
+        value: ${{ jobs.build.outputs.version }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Linux ${{ matrix.arch }}
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-26.04
+          - arch: arm64
+            runner: ubuntu-26.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      ARCH: ${{ matrix.arch }}
+      BUILD_RELEASE: ${{ inputs.bundles }}
+      EXPORT_IMAGE: ${{ inputs.export_images }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Release metadata
+        id: metadata
+        env:
+          RELEASE: ${{ inputs.release }}
+          COMMIT: ${{ github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$COMMIT"
+          release=$(git show HEAD:VERSION)
+          [[ "$release" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo 'VERSION must be MAJOR.MINOR.PATCH without leading zeroes or suffixes.' >&2
+            exit 1
+          }
+          version="v$release-${COMMIT:0:12}"
+          if [[ "$RELEASE" == true ]]; then
+            version="v$release"
+          fi
+          {
+            echo "version=$version"
+            echo "go=$(awk '$1 == "go" {print $2}' go.mod)"
+            echo "epoch=$(git show -s --format=%ct HEAD)"
+          } >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build binaries through the Dockerfile
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: binaries
+          platforms: linux/${{ matrix.arch }}
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.version }}
+            COMMIT=${{ github.sha }}
+          outputs: type=local,dest=${{ runner.temp }}/bin
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+      - name: Verify static binaries
+        run: |
+          for binary in livepeer livepeer-orchestrator livepeer-signer livepeer-chain livepeer-discovery; do
+            path="$RUNNER_TEMP/bin/$binary"
+            # A static ELF must have neither an interpreter nor shared-library dependencies.
+            readelf --program-headers "$path" > "$RUNNER_TEMP/program-headers"
+            readelf --dynamic "$path" > "$RUNNER_TEMP/dynamic"
+            if grep -Eq 'INTERP' "$RUNNER_TEMP/program-headers" || grep -Eq 'NEEDED' "$RUNNER_TEMP/dynamic"; then
+              echo "$binary is not statically linked" >&2
+              exit 1
+            fi
+          done
+      - name: Package deterministic bundle and checksums
+        if: env.BUILD_RELEASE == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_GO_VERSION: ${{ steps.metadata.outputs.go }}
+          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.epoch }}
+          BUNDLE: livepeer-${{ steps.metadata.outputs.version }}-linux-${{ matrix.arch }}
+        run: |
+          mkdir -p dist "$RUNNER_TEMP/package/$BUNDLE/bin"
+          cp "$RUNNER_TEMP/bin/"* "$RUNNER_TEMP/package/$BUNDLE/bin/"
+          cp LICENSE "$RUNNER_TEMP/package/$BUNDLE/"
+          printf 'version=%s\ncommit=%s\ngo=go%s\nos=linux\narch=%s\n' \
+            "$RELEASE_VERSION" "$RELEASE_COMMIT" "$RELEASE_GO_VERSION" "$ARCH" > "$RUNNER_TEMP/package/$BUNDLE/VERSION"
+          (
+            cd "$RUNNER_TEMP/package/$BUNDLE"
+            sha256sum bin/* > SHA256SUMS
+            chmod 755 . bin bin/*
+            chmod 644 LICENSE VERSION SHA256SUMS
+          )
+          tar --sort=name --mtime="@$SOURCE_DATE_EPOCH" --owner=0 --group=0 --numeric-owner \
+            --format=gnu -C "$RUNNER_TEMP/package" -cf - "$BUNDLE" | gzip -n > "dist/$BUNDLE.tar.gz"
+          (cd dist && sha256sum "$BUNDLE.tar.gz" > "$BUNDLE.tar.gz.sha256")
+      - name: Install and smoke test without Go
+        if: env.BUILD_RELEASE == 'true'
+        env:
+          RELEASE_VERSION: ${{ steps.metadata.outputs.version }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          BUNDLE: livepeer-${{ steps.metadata.outputs.version }}-linux-${{ matrix.arch }}
+        run: |
+          docker run --rm --network none --read-only --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 65534:65534 \
+            --tmpfs /tmp:rw,exec,mode=1777 \
+            -v "$PWD/dist:/artifacts:ro" \
+            -v "$PWD/.github/scripts/release-smoke.sh:/smoke.sh:ro" \
+            alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 \
+            sh /smoke.sh "/artifacts/$BUNDLE.tar.gz" "$RELEASE_VERSION" "$RELEASE_COMMIT"
+      - name: Package image from verified binaries
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/${{ matrix.arch }}
+          # Matching inputs reuse the binaries stage compiled above.
+          build-args: |
+            VERSION=${{ steps.metadata.outputs.version }}
+            COMMIT=${{ github.sha }}
+          load: true
+          tags: livepeer:test-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.metadata.outputs.version }}
+          cache-to: type=gha,scope=docker-${{ matrix.arch }},mode=max
+      - name: Smoke test image
+        env:
+          IMAGE_VERSION: ${{ steps.metadata.outputs.version }}
+          IMAGE_COMMIT: ${{ github.sha }}
+          IMAGE: livepeer:test-${{ matrix.arch }}
+        run: sh .github/scripts/docker-smoke.sh "$IMAGE" "$IMAGE_VERSION" "$IMAGE_COMMIT"
+      - name: Save tested release bundle
+        if: env.BUILD_RELEASE == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: 7
+      - name: Export tested image
+        if: env.EXPORT_IMAGE == 'true'
+        env:
+          IMAGE: livepeer:test-${{ matrix.arch }}
+        run: docker save --output "$RUNNER_TEMP/docker-$ARCH.tar" "$IMAGE"
+      - name: Save tested image
+        if: env.EXPORT_IMAGE == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docker-linux-${{ matrix.arch }}
+          path: ${{ runner.temp }}/docker-${{ matrix.arch }}.tar
+          if-no-files-found: error
+          compression-level: 0
+          overwrite: true
+          retention-days: ${{ inputs.release && 7 || 1 }}
