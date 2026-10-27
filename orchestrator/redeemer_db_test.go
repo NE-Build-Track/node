@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/node/eth"
@@ -110,6 +111,59 @@ func TestRedemptionReceiptSettlesAttempt(t *testing.T) {
 			pending, err := store.PendingPayers()
 			require.NoError(t, err)
 			require.Empty(t, pending)
+		})
+	}
+}
+
+func TestRedemptionMigrationHistoryAndRollback(t *testing.T) {
+	_, s, ticket, c, key := newRecoveryTest(t, 9)
+	files, err := fs.Sub(redeemerMigrationFiles, "migrations")
+	require.NoError(t, err)
+	require.NoError(t, migrations.Down(t.Context(), s.db, files))
+	// Seed a genuine v1 database, then upgrade without changing its ticket identity.
+	prepared, err := c.PrepareRedemption(t.Context(), key, big.NewInt(1), redeemTicket(ticket))
+	require.NoError(t, err)
+	_, err = s.db.Exec(`INSERT INTO redemption_attempts(sig,attempted_at,phase,raw_transaction,redeemer_address,nonce) VALUES(?,?,'submitted',?,?,?)`, ticket.Sig, time.Now().UTC().Format(time.RFC3339Nano), prepared.Raw, prepared.From.Hex(), "0")
+	require.NoError(t, err)
+	_, err = s.db.Exec("UPDATE winning_tickets SET tx_hash=? WHERE sig=?", prepared.Hash.Hex(), ticket.Sig)
+	require.NoError(t, err)
+	require.NoError(t, migrations.Up(t.Context(), s.db, files))
+	history, err := s.Redemptions()
+	require.NoError(t, err)
+	require.Equal(t, []RedemptionStatus{{Hash: prepared.Hash.Hex(), Phase: "submitted"}}, history)
+	// A lossless rollback remains possible with the original representable state.
+	require.NoError(t, migrations.Down(t.Context(), s.db, files))
+	require.NoError(t, migrations.Up(t.Context(), s.db, files))
+	_, err = s.db.Exec("UPDATE redemption_attempts SET phase='retryable' WHERE sig=?", ticket.Sig)
+	require.NoError(t, err)
+	next := prepared
+	next.Hash = ethcommon.HexToHash("0xabcdef")
+	next.Nonce = 1
+	require.NoError(t, s.recordPrepared(t.Context(), ticket, next))
+	require.ErrorContains(t, migrations.Down(t.Context(), s.db, files), "cannot_downgrade_redemption_transaction_history")
+	history, err = s.Redemptions()
+	require.NoError(t, err)
+	require.Len(t, history, 2)
+}
+
+func TestRedemptionRollbackPreservesTransactionProgress(t *testing.T) {
+	for _, phase := range []string{"submitted", "expired"} {
+		t.Run(phase, func(t *testing.T) {
+			_, s, ticket, c, key := newRecoveryTest(t, 22)
+			tickRecovery(t, s, c, key)
+			s = reopenRecoveryStore(t, s)
+			if phase == "expired" {
+				require.NoError(t, s.setTicketPhase(t.Context(), ticket.Sig, phase))
+			}
+			floor, err := s.SavedNonceFloor(t.Context(), key.Address())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, floor)
+			files, err := fs.Sub(redeemerMigrationFiles, "migrations")
+			require.NoError(t, err)
+			require.ErrorContains(t, migrations.Down(t.Context(), s.db, files), "cannot_downgrade_redemption_transaction_history")
+			floor, err = s.SavedNonceFloor(t.Context(), key.Address())
+			require.NoError(t, err)
+			require.EqualValues(t, 1, floor, "protected rollback must leave history intact")
 		})
 	}
 }

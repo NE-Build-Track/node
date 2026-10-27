@@ -171,39 +171,118 @@ type RedeemTicket struct {
 }
 
 func (c PaymentChain) PrepareRedemption(ctx context.Context, redeemer *Key, chainID *big.Int, t RedeemTicket) (SignedTransaction, error) {
-	return c.prepareRedemption(ctx, redeemer, chainID, t, nil)
-}
-
-// PrepareRedemptionAndStore reserves the nonce only after the caller saves the
-// signed redemption identity, before any possible broadcast.
-func (c PaymentChain) PrepareRedemptionAndStore(ctx context.Context, redeemer *Key, chainID *big.Int, t RedeemTicket, save func(SignedTransaction) error) (SignedTransaction, error) {
-	if save == nil {
-		return SignedTransaction{}, errors.New("transaction persistence is required")
+	plan, err := c.redemptionPlan(ctx, redeemer, t)
+	if err != nil {
+		return SignedTransaction{}, err
 	}
-	return c.prepareRedemption(ctx, redeemer, chainID, t, save)
+	return c.Contracts.Prepare(ctx, plan, redeemer, chainID)
 }
 
-func (c PaymentChain) prepareRedemption(ctx context.Context, redeemer *Key, chainID *big.Int, t RedeemTicket, save func(SignedTransaction) error) (SignedTransaction, error) {
+func (c PaymentChain) redemptionPlan(ctx context.Context, redeemer *Key, t RedeemTicket) (TransactionPlan, error) {
 	if redeemer == nil || t.Recipient == (ethcommon.Address{}) || t.FaceValue == nil || t.WinProb == nil || t.RecipientRand == nil {
-		return SignedTransaction{}, errors.New("incomplete redemption configuration or ticket")
+		return TransactionPlan{}, errors.New("incomplete redemption configuration or ticket")
 	}
 	address, err := c.Contracts.Resolve(ctx, "ticketBroker")
 	if err != nil {
-		return SignedTransaction{}, err
+		return TransactionPlan{}, err
 	}
 	coreTicket := contracts.MTicketBrokerCoreTicket{Recipient: t.Recipient, Sender: t.Sender, FaceValue: t.FaceValue, WinProb: t.WinProb, SenderNonce: new(big.Int).SetUint64(uint64(t.SenderNonce)), RecipientRandHash: t.RecipientRandHash, AuxData: t.AuxData}
 	data, err := c.Contracts.Pack("ticketBroker", "redeemWinningTicket", coreTicket, t.Signature, t.RecipientRand)
 	if err != nil {
-		return SignedTransaction{}, err
+		return TransactionPlan{}, err
 	}
-	plan, err := c.Contracts.PlanTransaction(ctx, redeemer.Address(), address, data, big.NewInt(0))
+	return c.Contracts.PlanTransaction(ctx, redeemer.Address(), address, data, big.NewInt(0))
+}
+
+// SubmitRedemption ports go-livepeer/eth/backend.go's Next/send/Update sequence.
+// Persistence happens before send, but only an acknowledged send advances Next.
+func (c PaymentChain) SubmitRedemption(ctx context.Context, nonces *NonceManager, manager *TransactionManager, redeemer *Key, chainID *big.Int, t RedeemTicket, save func(SignedTransaction) error) error {
+	nonces.Lock(redeemer.Address())
+	defer nonces.Unlock(redeemer.Address())
+	plan, err := c.redemptionPlan(ctx, redeemer, t)
 	if err != nil {
-		return SignedTransaction{}, err
+		return err
 	}
-	if save != nil {
-		return c.Contracts.PrepareAndStore(ctx, plan, redeemer, chainID, save)
+	nonce, err := nonces.NextContext(ctx, redeemer.Address())
+	if err != nil {
+		return err
 	}
-	return c.Contracts.Prepare(ctx, plan, redeemer, chainID)
+	prepared, err := c.Contracts.prepareAtNonce(ctx, plan, redeemer, chainID, save, &nonce)
+	if err != nil {
+		return err
+	}
+	var tx types.Transaction
+	if err := tx.UnmarshalBinary(prepared.Raw); err != nil {
+		return err
+	}
+	if err := manager.SendTransaction(ctx, &tx); err != nil {
+		return err
+	}
+	nonces.Update(redeemer.Address(), nonce)
+	return nil
+}
+
+// IsUsedTicket is ported from go-livepeer/eth/client_ticketbroker.go. The block
+// argument also supports the finalized observation needed for node settlement.
+func (c PaymentChain) IsUsedTicket(ctx context.Context, hash ethcommon.Hash, block string) (bool, error) {
+	var ref any = block
+	if block == "finalized" {
+		header, err := c.Contracts.RPC.header(ctx, "finalized")
+		if err != nil {
+			return false, err
+		}
+		if header.Hash == (ethcommon.Hash{}) || header.Number == nil {
+			return false, errors.New("invalid finalized header")
+		}
+		ref = map[string]any{"blockHash": header.Hash, "requireCanonical": true}
+	}
+	address, err := c.Contracts.ResolveAt(ctx, ref, "ticketBroker")
+	if err != nil {
+		return false, err
+	}
+	broker, err := contracts.NewTicketBrokerCaller(address, c.Contracts.callerAt(ref))
+	if err != nil {
+		return false, err
+	}
+	return broker.UsedTickets(&bind.CallOpts{Context: ctx}, hash)
+}
+
+// FinalizedNonce pins account state to the same canonical finalized reference
+// used for ticket-use settlement. A missing/malformed count is not evidence.
+func (c PaymentChain) FinalizedNonce(ctx context.Context, address ethcommon.Address) (uint64, error) {
+	header, err := c.Contracts.RPC.header(ctx, "finalized")
+	if err != nil {
+		return 0, err
+	}
+	if header.Hash == (ethcommon.Hash{}) || header.Number == nil || !(*big.Int)(header.Number).IsUint64() {
+		return 0, errors.New("invalid finalized header")
+	}
+	var nonce *hexutil.Uint64
+	ref := map[string]any{"blockHash": header.Hash, "requireCanonical": true}
+	if err := c.Contracts.RPC.ethereum.Client().CallContext(ctx, &nonce, "eth_getTransactionCount", address, ref); err != nil {
+		return 0, safeRPCError(err)
+	}
+	if nonce == nil {
+		return 0, errors.New("invalid finalized transaction count")
+	}
+	return uint64(*nonce), nil
+}
+
+// InclusionReceipt retains node's canonical-block check without treating an
+// unfinalized inclusion as settled. The ported manager only waits for inclusion.
+func (c PaymentChain) InclusionReceipt(ctx context.Context, hash ethcommon.Hash) (*types.Receipt, error) {
+	receipt, err := c.Contracts.RPC.TransactionReceipt(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+	header, err := c.Contracts.RPC.header(ctx, hexutil.EncodeBig(receipt.BlockNumber))
+	if err != nil {
+		return nil, err
+	}
+	if header.Hash != receipt.BlockHash {
+		return nil, ethereum.NotFound
+	}
+	return receipt, nil
 }
 
 func (c PaymentChain) Redeem(ctx context.Context, redeemer *Key, chainID *big.Int, t RedeemTicket) (ethcommon.Hash, error) {

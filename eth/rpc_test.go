@@ -94,3 +94,15 @@ func testRPC(t *testing.T, reply func(string, []json.RawMessage) any) *RPC {
 	t.Cleanup(rpc.Close)
 	return rpc
 }
+
+type ticketRevertRPCError struct{ message string }
+
+func (e ticketRevertRPCError) Error() string  { return e.message }
+func (e ticketRevertRPCError) ErrorCode() int { return -32000 }
+
+func TestTerminalTicketErrorRetainsOnlyKnownClassification(t *testing.T) {
+	original := ticketRevertRPCError{message: "secret https://user:password@rpc.example: ticket creationRound does not have a block hash; private calldata"}
+	require.ErrorIs(t, safeRPCError(original), ErrTicketCreationRound)
+	require.Equal(t, "ticket creationRound does not have a block hash", safeRPCError(original).Error())
+	require.Equal(t, "ethereum RPC error -32000", safeRPCError(ticketRevertRPCError{message: "nonce too low https://user:password@rpc.example"}).Error())
+}

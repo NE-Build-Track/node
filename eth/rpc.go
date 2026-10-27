@@ -105,9 +105,21 @@ func safeRPCError(err error) error {
 	}
 	var rpcError gethrpc.Error
 	if errors.As(err, &rpcError) {
+		// Preserve only upstream's fixed terminal ticket classification. Arbitrary
+		// provider text (including endpoints or calldata) must remain redacted.
+		if strings.Contains(rpcError.Error(), "ticket creationRound does not have a block hash") {
+			return ErrTicketCreationRound
+		}
 		return fmt.Errorf("ethereum RPC error %d", rpcError.ErrorCode())
 	}
 	return errors.New("ethereum RPC request failed")
+}
+
+var ErrTicketCreationRound = errors.New("ticket creationRound does not have a block hash")
+
+func (r *RPC) TransactionByHash(ctx context.Context, hash ethcommon.Hash) (*types.Transaction, bool, error) {
+	tx, pending, err := r.ethereum.TransactionByHash(ctx, hash)
+	return tx, pending, safeRPCError(err)
 }
 
 func ValidAddress(address string) bool {

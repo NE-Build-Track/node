@@ -29,6 +29,8 @@ HealthGrants = []
 # Both files must be owner-only; the password is read as exact bytes (no newline).
 # Or use LIVEPEER_ORCHESTRATOR_KEYSTORE_PASSWORD and omit KeystorePasswordFile.
 # RPCURLFile = "/run/secrets/livepeer-payment-rpc-url"
+# RedeemerTxTimeout = "5m" # Inclusion timeout per transaction attempt.
+# RedeemerMaxTxReplacements = 1 # Same-nonce fee replacements before retrying the ticket.
 # RedeemerMaxFeePerGas = "1000000000" # Optional ceiling, wei per gas
 # ChainID = 42161
 # Controller = "0xD8E8328501E9645d16Cf49539efC04f734606ee4" # Arbitrum default.

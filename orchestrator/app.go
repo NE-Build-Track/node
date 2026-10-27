@@ -33,36 +33,38 @@ import (
 type Params struct {
 	ConfigFile string `name:"config" configfile:"optional-default" basepath:"source" default:"config.toml" boa:"noconfig" descr:"Configuration file; empty disables discovery"`
 	nodeconfig.Settings
-	Account              *ethcommon.Address `descr:"Keystore account address"`
-	OrchestratorAddress  *ethcommon.Address `descr:"Registered orchestrator address receiving ticket payments; defaults to the keystore account"`
-	ETHUSDFeed           *ethcommon.Address `name:"eth-usd-feed" descr:"ETH/USD oracle address, alternative to a fixed wei-per-usd rate"`
-	PriceMaxAge          time.Duration      `default:"2h" descr:"Maximum age of the oracle observation"`
-	Listen               netip.AddrPort     `default:"127.0.0.1:8935" descr:"Public HTTP listener"`
-	MetricsListen        netip.AddrPort     `default:"127.0.0.1:8936" descr:"Loopback metrics listener"`
-	ServiceURL           boa.Text[*url.URL] `optional:"true" descr:"Public orchestrator base URL; defaults to http://listen"`
-	RunnerServiceURL     boa.Text[*url.URL] `optional:"true" descr:"Runner-facing base URL for callbacks and trickle; defaults to service-url"`
-	ProxyURLTemplate     string             `optional:"true" descr:"Generated proxy URL with {proxy} in a hostname label or final path segment"`
-	BootstrapSecret      string             `secret:"true" optional:"true" descr:"Dynamic runner bootstrap credential"`
-	BootstrapSecretFile  string             `basepath:"source" secretfor:"BootstrapSecret" descr:"File containing runner bootstrap credential"`
-	RunnerConfig         string             `basepath:"source" optional:"true" file:"true" descr:"Static runner TOML path"`
-	RedeemerDB           string             `optional:"true" file:"optional"`
-	KeystoreFile         string             `basepath:"source" optional:"true" descr:"Encrypted geth redemption account JSON file"`
-	KeystorePassword     *string            `secret:"true" optional:"true" descr:"Keystore decryption password"`
-	KeystorePasswordFile string             `basepath:"source" secretfor:"KeystorePassword" descr:"Owner-only file containing the exact keystore password bytes"`
-	RPCURL               *url.URL           `name:"rpc-url" secret:"true" optional:"true"`
-	RPCURLFile           string             `basepath:"source" name:"rpc-url-file" secretfor:"RPCURL"`
-	ChainID              *uint64            `min:"1"`
-	RedeemerMaxFeePerGas *uint256.Int       `descr:"Optional maximum redemption fee in wei per gas"`
-	Controller           *ethcommon.Address `name:"controller-address"`
-	WeiPerUSD            *big.Rat
-	TicketFaceValue      *uint256.Int
-	TicketWinProb        *uint256.Int
-	RunnerGrants         []string      `optional:"true" descr:"Private runner IP[:port] or CIDR grants"`
-	SessionProxyGrants   []string      `optional:"true" descr:"Private session proxy IP[:port] or CIDR grants"`
-	HealthGrants         []string      `optional:"true" descr:"Private static runner health IP[:port] or CIDR grants"`
-	HeartbeatInterval    time.Duration `default:"5s" descr:"Runner heartbeat interval"`
-	HeartbeatTTL         time.Duration `default:"30s" descr:"Runner heartbeat expiry"`
-	PrintConfig          bool          `optional:"true" boa:"noconfig,noenv" descr:"Print audited redacted TOML configuration"`
+	Account                   *ethcommon.Address `descr:"Keystore account address"`
+	OrchestratorAddress       *ethcommon.Address `descr:"Registered orchestrator address receiving ticket payments; defaults to the keystore account"`
+	ETHUSDFeed                *ethcommon.Address `name:"eth-usd-feed" descr:"ETH/USD oracle address, alternative to a fixed wei-per-usd rate"`
+	PriceMaxAge               time.Duration      `default:"2h" descr:"Maximum age of the oracle observation"`
+	Listen                    netip.AddrPort     `default:"127.0.0.1:8935" descr:"Public HTTP listener"`
+	MetricsListen             netip.AddrPort     `default:"127.0.0.1:8936" descr:"Loopback metrics listener"`
+	ServiceURL                boa.Text[*url.URL] `optional:"true" descr:"Public orchestrator base URL; defaults to http://listen"`
+	RunnerServiceURL          boa.Text[*url.URL] `optional:"true" descr:"Runner-facing base URL for callbacks and trickle; defaults to service-url"`
+	ProxyURLTemplate          string             `optional:"true" descr:"Generated proxy URL with {proxy} in a hostname label or final path segment"`
+	BootstrapSecret           string             `secret:"true" optional:"true" descr:"Dynamic runner bootstrap credential"`
+	BootstrapSecretFile       string             `basepath:"source" secretfor:"BootstrapSecret" descr:"File containing runner bootstrap credential"`
+	RunnerConfig              string             `basepath:"source" optional:"true" file:"true" descr:"Static runner TOML path"`
+	RedeemerDB                string             `optional:"true" file:"optional"`
+	KeystoreFile              string             `basepath:"source" optional:"true" descr:"Encrypted geth redemption account JSON file"`
+	KeystorePassword          *string            `secret:"true" optional:"true" descr:"Keystore decryption password"`
+	KeystorePasswordFile      string             `basepath:"source" secretfor:"KeystorePassword" descr:"Owner-only file containing the exact keystore password bytes"`
+	RPCURL                    *url.URL           `name:"rpc-url" secret:"true" optional:"true"`
+	RPCURLFile                string             `basepath:"source" name:"rpc-url-file" secretfor:"RPCURL"`
+	ChainID                   *uint64            `min:"1"`
+	RedeemerTxTimeout         time.Duration      `default:"5m" descr:"Inclusion timeout for each redemption transaction attempt"`
+	RedeemerMaxTxReplacements int                `default:"1" min:"0" descr:"Maximum fee replacements per redemption attempt"`
+	RedeemerMaxFeePerGas      *uint256.Int       `descr:"Optional maximum redemption fee in wei per gas"`
+	Controller                *ethcommon.Address `name:"controller-address"`
+	WeiPerUSD                 *big.Rat
+	TicketFaceValue           *uint256.Int
+	TicketWinProb             *uint256.Int
+	RunnerGrants              []string      `optional:"true" descr:"Private runner IP[:port] or CIDR grants"`
+	SessionProxyGrants        []string      `optional:"true" descr:"Private session proxy IP[:port] or CIDR grants"`
+	HealthGrants              []string      `optional:"true" descr:"Private static runner health IP[:port] or CIDR grants"`
+	HeartbeatInterval         time.Duration `default:"5s" descr:"Runner heartbeat interval"`
+	HeartbeatTTL              time.Duration `default:"30s" descr:"Runner heartbeat expiry"`
+	PrintConfig               bool          `optional:"true" boa:"noconfig,noenv" descr:"Print audited redacted TOML configuration"`
 }
 
 func (p Params) paymentsRequested() bool {
@@ -91,6 +93,9 @@ func (p Params) Validate() error {
 		}
 		if p.TicketWinProb.Eq(new(uint256.Int).SetAllOne()) {
 			return errors.New("--ticket-win-prob must be less than 2^256 - 1")
+		}
+		if p.RedeemerTxTimeout <= 0 || p.RedeemerMaxTxReplacements < 0 {
+			return errors.New("--redeemer-tx-timeout must be positive and --redeemer-max-tx-replacements must be nonnegative")
 		}
 		if p.RedeemerMaxFeePerGas != nil && p.RedeemerMaxFeePerGas.IsZero() {
 			return errors.New("--redeemer-max-fee-per-gas must be positive")
@@ -193,6 +198,7 @@ func printConfig(ctx *boa.HookContext, p *Params, out io.Writer) error {
 		"Listen": &p.Listen, "MetricsListen": &p.MetricsListen,
 		"RunnerGrants": &p.RunnerGrants, "SessionProxyGrants": &p.SessionProxyGrants, "HealthGrants": &p.HealthGrants,
 		"HeartbeatInterval": &p.HeartbeatInterval, "HeartbeatTTL": &p.HeartbeatTTL,
+		"RedeemerTxTimeout": &p.RedeemerTxTimeout, "RedeemerMaxTxReplacements": &p.RedeemerMaxTxReplacements,
 		"RedeemerDB": &p.RedeemerDB, "ChainID": &p.ChainID, "RedeemerMaxFeePerGas": &p.RedeemerMaxFeePerGas,
 		"Controller": &p.Controller, "WeiPerUSD": &p.WeiPerUSD, "ETHUSDFeed": &p.ETHUSDFeed,
 		"PriceMaxAge": &p.PriceMaxAge, "TicketFaceValue": &p.TicketFaceValue, "TicketWinProb": &p.TicketWinProb,
@@ -333,6 +339,11 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 	})
 	ctx, cancel := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+	if engine != nil {
+		if err := StartRedemptionRecovery(ctx, redeemerDB, paymentChain, redeemerKey, RedemptionOptions{Timeout: p.RedeemerTxTimeout, MaxReplacements: p.RedeemerMaxTxReplacements}); err != nil {
+			return err
+		}
+	}
 	mainServer := &http.Server{BaseContext: func(net.Listener) context.Context { return ctx }, Handler: app, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 90 * time.Second, MaxHeaderBytes: 1 << 20, MaxHeaderValueCount: 128}
 	metricsServer := &http.Server{Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 1 << 16, MaxHeaderValueCount: 128}
 	errs := make(chan error, 2)

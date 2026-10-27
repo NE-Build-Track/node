@@ -122,8 +122,8 @@ every hour; `PriceMaxAge` must be positive and defaults to two hours. Startup
 requires a valid observation. Stale rates suspend new sessions; existing
 sessions retain their initial price.
 
-`RedeemerMaxFeePerGas` optionally caps redemption fees in wei per gas. The
-cap is per gas, not a total spending budget. Winning tickets wait until payment
+See [transaction recovery](payment-recovery.md#orchestrator-transaction-recovery)
+for timeouts, replacements and fee settings. Winning tickets wait until payment
 parameters expire before redemption exposes their randomness on-chain. Only a
 successful, canonical, finalized receipt settles their liability.
 

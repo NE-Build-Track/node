@@ -113,9 +113,9 @@ or a new chain invocation.
 The signer account is the payer, supplying the TicketBroker deposit and reserve.
 The orchestrator's keystore account signs redemptions and pays gas. Ticket payments
 credit `OrchestratorAddress`, which defaults to that account. The chain account
-must match the keystore account when signing. Keep a redemption key exclusive to
-its orchestrator worker; concurrent CLI or other use can conflict with nonce
-tracking.
+must match the keystore account when signing. Multiple orchestrator processes
+may share a redemption key. Failed submissions are retried automatically.
+See [transaction recovery](payment-recovery.md).
 
 ### Prepare a keystore
 

@@ -103,18 +103,39 @@ use these states:
 | State | Meaning and recovery |
 | --- | --- |
 | Queued (no attempt) | Wait for parameter expiry. Preparation failures leave the ticket eligible for another attempt. |
-| `prepared` | Signed bytes, nonce and locally computed hash are durable; the worker resumes the first send after restart. |
-| `broadcast` | A send may have reached RPC. Reconcile receipts automatically; an operator may explicitly resend identical bytes. |
-| `submitted` | RPC acknowledged the hash. Keep checking receipts; explicit identical-byte retry is available if necessary. |
-| `confirmed` | Receipt is successful, at or below the finalized head, and matches the canonical block hash. Liability is settled. |
-| `reverted` | A canonical finalized receipt failed. Retain the audit row; do not resubmit automatically. |
-| `expired` | Ticket creation round is outside the contract validity window. Retain the audit row. |
+| `prepared` | Signed bytes, nonce and hash are durable before sending; restart resumes the saved transaction. |
+| `broadcast` | Send in progress or interrupted before recording its outcome; restart resumes the saved transaction. |
+| `submitted` | RPC acknowledged the hash; monitor inclusion and replace on timeout. |
+| `retryable` | Submission, waiting or replacement failed; retry the ticket automatically. Older hashes remain under receipt reconciliation. |
+| `mined` | Canonical inclusion observed; wait for finalization without fee replacement. A reorg resumes recovery. |
+| `awaiting_finality` | Latest state says the ticket is used; pause submission until finalized state confirms use or a reorg removes it. |
+| `confirmed` / `used` | Successful canonical finalized receipt or finalized ticket-use observation settles liability. |
+| `reverted` / `invalid` | Finalized transaction failure or an invalid ticket; stop submitting and reconcile unresolved hashes. |
+| `expired` | Ticket creation round is outside its validity window; reconcile unresolved hashes. |
+| `superseded` | Finalized inclusion consumed the same sender/nonce, or finalized ticket settlement made this transaction unnecessary. |
 
-An uncertain broadcast blocks preparation of a new transaction
-for this worker, preventing accidental nonce reuse. The redemption key must be
-exclusive to this worker; do not submit concurrent CLI transactions from it.
-Only a canonical finalized receipt marks a ticket redeemed. A pending receipt,
-reorg, unavailable finalized head or RPC failure retains uncertainty and liability.
+Only canonical finalized state settles a ticket. RPC failures, missing receipts,
+unfinalized inclusions and reorgs retain uncertainty and liability. Each ticket
+counts once even when it has several signed transactions. Previously exposed
+recipient randomness stays closed to new payments throughout retries.
+
+`RedeemerTxTimeout` (`--redeemer-tx-timeout`) defaults to five minutes per
+inclusion attempt. `RedeemerMaxTxReplacements` (`--redeemer-max-tx-replacements`)
+defaults to one; zero disables replacements. Replacements retain the nonce and
+calldata and raise both fee caps by geth's default 10% threshold, rounding up
+with a strict increase.
+Geth estimates initial fees using the RPC header's base fee. A missing base fee
+leaves the ticket queued with an error. `RedeemerMaxFeePerGas` optionally caps
+initial and replacement fees in wei per gas. Finalization waits do not consume
+the inclusion timeout.
+
+Restart restores deadlines, replacement budgets and nonce reservations for
+acknowledged sends. Rejected submissions do not reserve a nonce. A rotated key can
+resend saved bytes and reconcile receipts, but cannot replace the previous account's transactions.
+
+Migration 002 preserves existing transactions. Its rollback refuses to discard
+transactions or metadata that the old schema cannot represent. Retain the upgraded
+database for a compatible binary when rollback is refused.
 
 Inspect status without a key or RPC connection:
 
@@ -122,8 +143,8 @@ Inspect status without a key or RPC connection:
 livepeer orchestrator redemptions
 ```
 
-After checking the hash on the configured chain, explicitly retry the stored
-transaction if it is absent or needs rebroadcast:
+Automatic recovery normally handles rebroadcast. To explicitly resend the
+current retryable transaction using its saved bytes and fees:
 
 ```sh
 livepeer orchestrator redemptions \
@@ -138,9 +159,8 @@ pass the same `--config`, or `--network` and `--data-dir`, as the service.
 `--redeemer-db` selects a different database. Recovery reads `RPCURLFile` and `ChainID`
 for retries; `--rpc-url-file` and `--chain-id` override them. It does not unlock
 the account or read unrelated service credentials. RPC endpoints use normal
-system TLS trust. This operation uses the exact saved signed bytes, nonce and
-hash; it cannot create a replacement
-or change fees. A retry error retains the hash and uncertain state.
+system TLS trust. Historical hashes remain inspectable; manual retry cannot
+reopen a terminal ticket or displace a newer active transaction.
 
 In-memory control state is bounded: payment sessions have a 100,000-entry quota
 and 24-hour inactivity retention; ticket replay guards have a 1,000,000-nonce
@@ -149,11 +169,4 @@ session activity current. Expiry is monotonic within a recipient lifetime so
 a backward chain observation cannot revive parameters after their replay guards
 are removed. Auth-token refresh never resets nonce tracking. Winning tickets
 and uncertain transactions are retained for audit/reconciliation, so back up
-and monitor database disk use independently of these quotas.
-
-Redemption planning uses geth's dynamic-fee selection and requires a base fee
-in the RPC header; a missing base fee leaves the ticket queued with an error.
-`RedeemerMaxFeePerGas` optionally caps the fee in wei per gas; a plan above
-that ceiling remains queued without signing or broadcasting. Prepared and
-submitted identities reserve their nonces across restarts. Explicit retry
-resends the stored transaction without changing its fees.
+and monitor database disk use independently of these control-state quotas.

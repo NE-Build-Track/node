@@ -255,6 +255,12 @@ func (c *Contracts) PrepareAndStore(ctx context.Context, plan TransactionPlan, k
 }
 
 func (c *Contracts) prepare(ctx context.Context, plan TransactionPlan, key *Key, chainID *big.Int, save func(SignedTransaction) error) (SignedTransaction, error) {
+	return c.prepareAtNonce(ctx, plan, key, chainID, save, nil)
+}
+
+// prepareAtNonce lets the ported redemption backend own nonce allocation through
+// submission. The CLI's prepare-and-reserve behavior remains unchanged.
+func (c *Contracts) prepareAtNonce(ctx context.Context, plan TransactionPlan, key *Key, chainID *big.Int, save func(SignedTransaction) error, explicit *uint64) (SignedTransaction, error) {
 	if key == nil || key.Address() != plan.From || chainID == nil || chainID.Sign() <= 0 {
 		return SignedTransaction{}, errors.New("transaction account does not match signing key")
 	}
@@ -297,12 +303,15 @@ func (c *Contracts) prepare(ctx context.Context, plan TransactionPlan, key *Key,
 	state := c.nonceState(plan.From)
 	state.Lock()
 	defer state.Unlock()
-	nonce, err := c.RPC.ethereum.PendingNonceAt(ctx, plan.From)
-	if err != nil {
-		return SignedTransaction{}, safeRPCError(err)
-	}
-	if nonce < state.next {
-		nonce = state.next
+	var nonce uint64
+	if explicit != nil {
+		nonce = *explicit
+	} else {
+		nonce, err = c.RPC.ethereum.PendingNonceAt(ctx, plan.From)
+		if err != nil {
+			return SignedTransaction{}, safeRPCError(err)
+		}
+		nonce = max(nonce, state.next)
 	}
 	if nonce == math.MaxUint64 {
 		return SignedTransaction{}, errors.New("transaction account nonce exhausted")
@@ -325,7 +334,9 @@ func (c *Contracts) prepare(ctx context.Context, plan TransactionPlan, key *Key,
 	}
 	// Once saved or returned to a caller, this identity can be broadcast even
 	// if its outcome is uncertain. Never reuse its nonce in this client.
-	state.next = nonce + 1
+	if explicit == nil {
+		state.next = nonce + 1
+	}
 	return prepared, nil
 }
 

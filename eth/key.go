@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,12 +16,24 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
 // Key is a local Ethereum signer. The key material never crosses the JSON-RPC
 // boundary and is not included in command output or errors.
 type Key struct{ private *ecdsa.PrivateKey }
+
+// SignTx adapts the local key to the ported go-livepeer transaction signer.
+func (k *Key) SignTx(tx *types.Transaction) (*types.Transaction, error) {
+	return k.SignTxForChain(tx, tx.ChainId())
+}
+
+// SignTxForChain retains upstream accountManager's chain binding when an
+// unsigned legacy replacement does not yet encode its original chain ID.
+func (k *Key) SignTxForChain(tx *types.Transaction, chainID *big.Int) (*types.Transaction, error) {
+	return types.SignTx(tx, types.LatestSignerForChainID(chainID), k.private)
+}
 
 // SelectKeystore selects metadata without unlocking a key. An explicit file
 // bypasses directory discovery; its address is checked again after decryption.

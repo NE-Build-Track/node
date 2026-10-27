@@ -365,6 +365,7 @@ func TestRedemptionValidationBeforeResources(t *testing.T) {
 func paymentKeystoreParams(t *testing.T, endpoint string) Params {
 	t.Helper()
 	return Params{
+		RedeemerTxTimeout: 5 * time.Minute, RedeemerMaxTxReplacements: 1,
 
 		Listen: netip.MustParseAddrPort("127.0.0.1:0"), MetricsListen: netip.MustParseAddrPort("127.0.0.1:0"), ServiceURL: boa.Text[*url.URL]{Value: mustURL(t, "http://127.0.0.1:8935")},
 		BootstrapSecret: "test", HeartbeatInterval: time.Hour, HeartbeatTTL: 2 * time.Hour,
