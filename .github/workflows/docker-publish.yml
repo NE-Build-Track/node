@@ -15,12 +15,42 @@ defaults:
     shell: bash
 
 jobs:
-  publish:
+  images:
     if: >-
-      github.event.workflow_run.event == 'push' &&
+      (github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') &&
       (github.event.workflow_run.head_branch == 'main' || startsWith(github.event.workflow_run.head_branch, 'v')) &&
       github.event.workflow_run.head_repository.full_name == github.repository &&
       github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    outputs:
+      available: ${{ steps.images.outputs.available }}
+    steps:
+      - name: Check for tested images
+        id: images
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_EVENT: ${{ github.event.workflow_run.event }}
+        run: |
+          count=$(gh api --paginate --slurp "repos/$GH_REPO/actions/runs/$RUN_ID/artifacts?per_page=100" | \
+            jq '[.[].artifacts[].name | select(. == "docker-linux-amd64" or . == "docker-linux-arm64")] | unique | length')
+          if [[ "$count" == 2 ]]; then
+            echo 'available=true' >> "$GITHUB_OUTPUT"
+          elif [[ "$count" == 0 && "$SOURCE_EVENT" == workflow_dispatch ]]; then
+            echo 'available=false' >> "$GITHUB_OUTPUT"
+            echo 'Skipping Docker publication: packaging-only manual run.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'Expected tested images for both amd64 and arm64.' >&2
+            exit 1
+          fi
+
+  publish:
+    needs: images
+    if: needs.images.outputs.available == 'true'
     runs-on: ubuntu-26.04
     environment: docker-publish
     timeout-minutes: 15

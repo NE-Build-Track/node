@@ -16,8 +16,10 @@ builder in `docker/Dockerfile` aligned with it.
 ## Releases
 
 Set the [VERSION](../VERSION) file to the next `MAJOR.MINOR.PATCH` number without
-a `v` prefix, leading zeroes, prerelease suffix, or build metadata. Commit it,
-then run the release helper with the Git remote name:
+a `v` prefix, leading zeroes, prerelease suffix, or build metadata. Commit it to
+`main`, then run **Create Release** from GitHub Actions.
+
+You can also run the release helper locally with the Git remote name:
 
 ```sh
 ./release.sh github
@@ -26,9 +28,17 @@ then run the release helper with the Git remote name:
 The helper creates and pushes a `vMAJOR.MINOR.PATCH` tag. Release tags cannot be
 updated or deleted, and published releases are immutable.
 The [Release workflow](../.github/workflows/release.yml) on GitHub publishes
-bundles after CI and packaging tests pass. To test packaging before tagging, run
-**Release** manually from GitHub Actions; manual runs save artifacts without
-publishing a release.
+bundles after CI and packaging tests pass. Successful publication also starts
+Docker image publishing.
+
+If **Create Release** creates the tag but fails to start **Release**, run:
+
+```sh
+gh workflow run release.yml --repo livepeer/node --ref vMAJOR.MINOR.PATCH -f publish=true
+```
+
+If **Release** or **Publish Docker** fails, choose **Re-run failed jobs** before
+its image artifacts expire.
 
 ## Checks
 
