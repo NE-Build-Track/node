@@ -28,7 +28,7 @@ func discoveryResponse(s *Service, query string) *httptest.ResponseRecorder {
 }
 
 func TestSignerDiscovery(t *testing.T) {
-	const advertised = `[{"address":"http://localhost:9000","runners":[{"url":"http://localhost:9000/app","observed_at":"2026-01-01T00:00:00Z","app":"retained","version":"v1","metadata":"model-x","mode":"single-shot","gpu":{"id":"0","name":" H100 ","vram_mb":80000},"capacity":3,"capacity_used":1,"capacity_available":2,"price_info":{"price":10,"price_usd":0.1,"currency":"wei","unit":"fixed"}},{"url":"http://localhost:9000/cpu","observed_at":"2026-01-01T00:00:00Z","app":"cpu","mode":"single-shot","capacity":1,"price_info":{"price":1,"currency":"wei","unit":"fixed"}}]}]`
+	const advertised = `[{"address":"http://localhost:9000","runners":[{"runner_id":"gpu-runner","url":"https://gpu-runner.example","observed_at":"2026-01-01T00:00:00Z","app":"retained","version":"v1","metadata":"model-x","mode":"single-shot","gpu":{"id":"0","name":" H100 ","vram_mb":80000},"capacity":3,"capacity_used":1,"capacity_available":2,"price_info":{"price":10,"price_usd":0.1,"currency":"wei","unit":"fixed"}},{"url":"http://localhost:9000/cpu","observed_at":"2026-01-01T00:00:00Z","app":"cpu","mode":"single-shot","capacity":1,"price_info":{"price":1,"currency":"wei","unit":"fixed"}}]}]`
 	bodies := map[string]string{
 		"empty": "[]", "good": advertised, "failed": "", "malformed": "not JSON",
 		"metadata":  `[{"nodes":[]}]`,
@@ -124,6 +124,12 @@ func TestSignerDiscovery(t *testing.T) {
 			require.Equal(t, expected[0].Address, result[0].Address)
 			want := slices.DeleteFunc(slices.Clone(expected[0].Runners), func(r discoveredRunner) bool { return !slices.Contains(test.apps, r.App) })
 			require.Equal(t, want, result[0].Runners, "preserve advertised fields and URLs")
+			for _, runner := range result[0].Runners {
+				if runner.App == "retained" {
+					require.Equal(t, "gpu-runner", runner.RunnerID)
+					require.Equal(t, "https://gpu-runner.example", runner.URL)
+				}
+			}
 		})
 	}
 }

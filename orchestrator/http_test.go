@@ -353,8 +353,9 @@ func TestTrickleChannelsScopedToSession(t *testing.T) {
 
 func TestRunnerGPUIsPreservedForPythonDiscovery(t *testing.T) {
 	var request heartbeatRequest
-	require.NoError(t, json.Unmarshal([]byte(`{"runner_id":"gpu-runner","runner_url":"https://runner.example","app":"retained","mode":"single-shot","status":"ready","capacity":1,"gpu":{"id":"0","name":"H100","vram_mb":80000}}`), &request))
+	require.NoError(t, json.Unmarshal([]byte(`{"runner_id":"gpu-runner","proxy":true,"runner_url":"https://runner.example","app":"retained","mode":"single-shot","status":"ready","capacity":1,"gpu":{"id":"0","name":"H100","vram_mb":80000}}`), &request))
 	registry := NewRegistry("bootstrap", "https://orchestrator.example", time.Second, 30*time.Second)
+	registry.proxyTemplate = "https://{proxy}.example"
 	_, status, err := registry.Heartbeat(request, "bootstrap")
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, status)
@@ -367,4 +368,5 @@ func TestRunnerGPUIsPreservedForPythonDiscovery(t *testing.T) {
 	var record map[string]any
 	require.NoError(t, json.Unmarshal(encoded, &record))
 	require.Equal(t, "gpu-runner", record["runner_id"])
+	require.Equal(t, "https://gpu-runner.example", record["url"])
 }

@@ -210,6 +210,7 @@ type discoveredGPU struct {
 }
 
 type discoveredRunner struct {
+	RunnerID          string         `json:"runner_id,omitempty"`
 	ObservedAt        string         `json:"observed_at"`
 	URL               string         `json:"url"`
 	App               string         `json:"app"`
