@@ -113,10 +113,16 @@ find_release() {
 verify_tag
 release=$(find_release)
 if [[ "$release" == null ]]; then
-  gh release create "$tag" --repo "$repo" --verify-tag --draft --generate-notes --title "$tag"
-  release=$(find_release)
+  # The releases list can lag behind creation. Keep the response so a new draft
+  # does not need to appear in that list before we can upload its assets.
+  release=$(gh api --method POST "repos/$repo/releases" \
+    -f tag_name="$tag" -f target_commitish="$commit" -f name="$tag" \
+    -F draft=true -F prerelease=false -F generate_release_notes=true)
 fi
-id=$(jq -er .id <<< "$release")
+id=$(jq -er .id <<< "$release") || {
+  echo "Release $tag has no release ID; refusing to publish." >&2
+  exit 1
+}
 if jq -e .draft <<< "$release" > /dev/null; then
   gh release upload "$tag" --repo "$repo" --clobber "${assets[@]/#/dist/}"
 elif ! jq -e '.prerelease == false' <<< "$release" > /dev/null; then

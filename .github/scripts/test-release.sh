@@ -53,12 +53,18 @@ case "$*" in
   api\ */commits/*\ --jq\ .sha) cat "$STATE/commit" ;;
   api\ --paginate\ --slurp\ */releases\?per_page=100)
     [[ ! -f "$STATE/api-error" ]] || exit 1
+    if [[ -f "$STATE/stale-list" && -f "$STATE/created" ]]; then
+      echo '[[{"id":8,"tag_name":"v0.0.0","draft":false}]]'
+      exit 0
+    fi
     jq -s '[[{id: 8, tag_name: "v0.0.0", draft: false}], .]' "$STATE/release" ;;
   api\ --paginate\ --slurp\ */assets\?per_page=100)
     jq -s '[[], .]' "$STATE/assets" ;;
-  "release create $RELEASE_TAG --repo $GH_REPO --verify-tag --draft --generate-notes --title $RELEASE_TAG")
+  "api --method POST repos/$GH_REPO/releases -f tag_name=$RELEASE_TAG -f target_commitish=$RELEASE_COMMIT -f name=$RELEASE_TAG -F draft=true -F prerelease=false -F generate_release_notes=true")
     echo create >> "$STATE/writes"
-    echo '{"id":7,"tag_name":"v1.2.3","draft":true,"prerelease":false}' > "$STATE/release" ;;
+    echo '{"id":7,"tag_name":"v1.2.3","draft":true,"prerelease":false}' > "$STATE/release"
+    touch "$STATE/created"
+    cat "$STATE/release" ;;
   "release upload $RELEASE_TAG --repo $GH_REPO --clobber "*)
     jq -e .draft "$STATE/release" > /dev/null
     echo upload >> "$STATE/writes"
@@ -97,6 +103,7 @@ reject bash "$ROOT/release.sh" --authorize
 rm "$STATE/permission-error"
 
 reset_github() {
+  rm -f "$STATE/created"
   : > "$STATE/release"
   : > "$STATE/assets"
   : > "$STATE/writes"
@@ -233,6 +240,12 @@ for failure in missing extra digest; do
   test "$(cat "$STATE/writes")" = $'create\nupload\nedit'
 done
 
+reset_github
+# Creation must succeed even while the releases list omits the new draft.
+touch "$STATE/stale-list"
+release --publish
+test "$(cat "$STATE/writes")" = $'create\nupload\nedit'
+rm "$STATE/stale-list"
 reset_github
 touch "$STATE/interrupt"
 reject release --publish
