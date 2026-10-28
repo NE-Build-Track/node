@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/livepeer/node/destination"
 	discovery "github.com/livepeer/node/discovery/shared"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/trickle"
 )
 
@@ -43,6 +45,8 @@ type Server struct {
 }
 
 func NewServer(registry *Registry, runnerPolicy, proxyPolicy destination.Policy, logger *slog.Logger) *Server {
+	logger = logger.With("component", "orchestrator")
+	registry.logger = logger
 	s := &Server{registry: registry, logger: logger, mux: http.NewServeMux(), channels: map[string]*channel{}, o2r: map[string]string{}}
 	serviceURL, _ := url.Parse(registry.service)
 	s.basePath = strings.TrimRight(serviceURL.Path, "/")
@@ -76,10 +80,17 @@ func NewServer(registry *Registry, runnerPolicy, proxyPolicy destination.Policy,
 	s.trickleServer = trickle.ConfigureServer(trickle.TrickleServerConfig{
 		BasePath: "/ai/trickle/", Mux: s.mux, BeforeDelete: s.beforeDeleteChannel,
 	})
+	registry.mu.Lock()
+	registry.server = s
+	registry.mu.Unlock()
 	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.registry.metrics.HTTP(w, r, s.serveHTTP)
+}
+
+func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(r.URL.Path+"/", "/../") {
 		fail(w, http.StatusBadRequest, "invalid path")
 		return
@@ -103,6 +114,43 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	stream := proxyID != "" || strings.HasPrefix(r.URL.Path, "/ai/trickle/") || strings.HasPrefix(r.URL.Path, "/proxy/") || strings.HasPrefix(r.URL.Path, "/run/") || strings.HasSuffix(r.URL.Path, "/app") || strings.Contains(r.URL.Path, "/app/")
+	_, pattern := s.mux.Handler(r)
+	observability.Operation(r, pattern)
+	if proxyID != "" {
+		observability.Operation(r, "generated_proxy")
+	}
+	// Resolve only known routes before admission so rejected application work is
+	// attributed without turning attacker-supplied runner IDs into label values.
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if pattern != "" && len(parts) >= 3 && parts[0] == "apps" {
+		if parts[2] == "app" {
+			observability.App(r, s.registry.identity(parts[1], ""))
+		} else if len(parts) >= 5 && parts[2] == "session" && parts[4] == "app" {
+			observability.App(r, s.registry.identity(parts[1], parts[3]))
+		}
+	}
+	generated := proxyID
+	if generated == "" && pattern != "" && len(parts) >= 2 && (parts[0] == "proxy" || parts[0] == "run") {
+		generated = parts[1]
+	}
+	if generated != "" {
+		if s.registry.singleShotProxy(generated) {
+			observability.App(r, s.registry.identity(generated, ""))
+		} else if _, id, sid, _, ok := s.registry.proxyTarget(generated); ok {
+			observability.App(r, s.registry.identity(id, sid))
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/ai/trickle/") {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/ai/trickle/"), "/")
+		s.mu.Lock()
+		ch := s.channels[parts[0]]
+		var identity observability.Identity
+		if ch != nil {
+			identity = ch.identity
+		}
+		s.mu.Unlock()
+		observability.Stream(r, identity, "trickle")
+	}
 	slots := s.controlSlots
 	if stream {
 		slots = s.streamSlots
@@ -113,6 +161,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case slots <- struct{}{}:
 		defer func() { <-slots }()
 	default:
+		s.registry.metrics.Add("http_admission_rejections_total", 1, observability.Labels{"pool": map[bool]string{true: "stream", false: "control"}[stream]})
+		observability.Outcome(r, "capacity")
 		fail(w, http.StatusServiceUnavailable, "server busy")
 		return
 	}
@@ -125,7 +175,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-func (s *Server) SetPayment(engine *PaymentEngine) { s.payment = engine }
+func (s *Server) SetPayment(engine *PaymentEngine) {
+	s.payment = engine
+	if engine != nil {
+		engine.metrics, engine.identity = s.registry.metrics, s.registry.identity
+		engine.store.logger = s.logger
+		if engine.store.metrics == nil {
+			engine.store.metrics = s.registry.metrics
+			engine.store.metrics.Snapshot(engine.store.collectMetrics)
+		}
+	}
+}
 
 func (s *Server) Close() {
 	s.registry.Close()
@@ -145,6 +205,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) (int, error) {
 
 func fail(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func failReservation(w http.ResponseWriter, r *http.Request, status int, err error) {
+	if capacityError(err) {
+		observability.Outcome(r, "capacity")
+	}
+	fail(w, status, err.Error())
 }
 
 func decode(r *http.Request, value any) error {
@@ -190,7 +257,7 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.mu.Lock()
-		s.newChannel(id, "o2r", "application/json", resp.RunnerID, "")
+		s.newChannel(id, "o2r", "application/json", resp.RunnerID, "").identity = runnerIdentity(resp.RunnerID, current)
 		s.o2r[resp.RunnerID] = id
 		s.mu.Unlock()
 		s.registry.mu.Unlock()
@@ -248,7 +315,7 @@ func (s *Server) unregister(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) discovery(w http.ResponseWriter, r *http.Request) {
 	if n, _ := writeJSON(w, http.StatusOK, s.registry.Discovery()); n > discovery.MaxBody {
-		s.logger.WarnContext(r.Context(), "orchestrator discovery response exceeds signer size limit", "response_bytes", n, "max_bytes", discovery.MaxBody)
+		s.logger.WarnContext(r.Context(), "orchestrator discovery response exceeds signer size limit", "event", "discovery_response", "operation", "discovery", "outcome", "error", "error_kind", "response_limit", "response_bytes", n, "max_bytes", discovery.MaxBody)
 	}
 }
 
@@ -258,7 +325,7 @@ func (s *Server) reserve(w http.ResponseWriter, r *http.Request) {
 	}
 	id, appURL, controlURL, status, err := s.registry.Reserve(r.PathValue("runner_id"))
 	if err != nil {
-		fail(w, status, err.Error())
+		failReservation(w, r, status, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"session_id": id, "app_url": appURL, "control_url": controlURL})
@@ -322,6 +389,7 @@ func (s *Server) createProxy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
+	observability.App(r, s.registry.identity(r.PathValue("runner_id"), r.PathValue("session_id")))
 	target, token, status, err := s.registry.sessionTarget(r.PathValue("runner_id"), r.PathValue("session_id"))
 	if err != nil {
 		fail(w, status, err.Error())
@@ -332,6 +400,7 @@ func (s *Server) proxySession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxySingleShot(w http.ResponseWriter, r *http.Request) {
+	observability.App(r, s.registry.identity(r.PathValue("runner_id"), ""))
 	if s.proxyPaidSingleShot(w, r) {
 		return
 	}
@@ -343,10 +412,10 @@ func (s *Server) proxySingleShot(w http.ResponseWriter, r *http.Request) {
 	}
 	id, _, _, status, err := s.registry.ReserveWithID(runnerID, id)
 	if err != nil {
-		fail(w, status, err.Error())
+		failReservation(w, r, status, err)
 		return
 	}
-	defer s.registry.ReleaseBySession(id)
+	defer s.registry.ReleaseBySession(id, "completed")
 	target, token, status, err := s.registry.sessionTarget(runnerID, id)
 	if err != nil {
 		fail(w, status, err.Error())
@@ -367,6 +436,7 @@ func (s *Server) proxyGenerated(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "proxy not found")
 		return
 	}
+	observability.App(r, s.registry.identity(runnerID, sid))
 	control := s.registry.runnerServiceURL() + "/runner/" + url.PathEscape(runnerID) + "/session/" + url.PathEscape(sid)
 	transport := s.proxyTransport
 	if target.runner {
@@ -376,6 +446,11 @@ func (s *Server) proxyGenerated(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) proxy(w http.ResponseWriter, r *http.Request, transport http.RoundTripper, target *url.URL, appPath, runnerID, sid, token, control string) {
+	kind := "runner"
+	if transport == s.proxyTransport {
+		kind = "session_proxy"
+	}
+	transport = upstreamObserver{transport, s.registry.metrics, s.registry.identity(runnerID, sid), kind}
 	sessionCtx, ok := s.registry.sessionContext(runnerID, sid)
 	if !ok || sessionCtx.Err() != nil {
 		fail(w, http.StatusNotFound, "session not found")
@@ -397,11 +472,20 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, transport http.Ro
 	})
 	defer stop()
 	defer cancel()
+	defer func() {
+		if errors.Is(context.Cause(sessionCtx), errRunnerUnavailable) {
+			observability.Outcome(r, "transport_error")
+		} else if sessionCtx.Err() != nil {
+			observability.Outcome(r, "session_stopped")
+		}
+	}()
 	proxy := &httputil.ReverseProxy{
+		ErrorLog:      log.New(proxyLog{s.logger.With("runner_id", runnerID, "session_id", sid)}, "", 0),
 		Transport:     transport,
 		FlushInterval: -1,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
-			s.logger.Warn("runner proxy failed", "runner_id", runnerID, "session_id", sid, "error_kind", "upstream_failure")
+			observability.Outcome(r, "transport_error")
+			s.logger.Warn("runner proxy failed", "event", "proxy_failed", "operation", "proxy", "outcome", "error", "runner_id", runnerID, "session_id", sid, "error_kind", "upstream_failure")
 			fail(w, http.StatusBadGateway, "runner destination unavailable")
 		},
 		Rewrite: func(req *httputil.ProxyRequest) {
@@ -427,6 +511,14 @@ func (s *Server) proxy(w http.ResponseWriter, r *http.Request, transport http.Ro
 	proxy.ServeHTTP(w, r.WithContext(ctx))
 }
 
+// ReverseProxy's internal messages may include transport-provided error text.
+type proxyLog struct{ logger *slog.Logger }
+
+func (l proxyLog) Write(p []byte) (int, error) {
+	l.logger.Warn("proxy stream interrupted", "event", "proxy_stream", "operation", "proxy", "outcome", "error", "error_kind", "stream_error")
+	return len(p), nil
+}
+
 func (s *Server) createChannels(w http.ResponseWriter, r *http.Request) {
 	if !s.callbackAuthorized(r) {
 		fail(w, http.StatusUnauthorized, "invalid session token")
@@ -447,6 +539,7 @@ func (s *Server) createChannels(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, "session not found")
 		return
 	}
+	identity := s.registry.identity(r.PathValue("runner_id"), r.PathValue("session_id"))
 	for _, item := range body.Channels {
 		if item.Name == "" {
 			fail(w, http.StatusBadRequest, "channel name required")
@@ -494,7 +587,7 @@ func (s *Server) createChannels(w http.ResponseWriter, r *http.Request) {
 			if item.MimeType == "" {
 				item.MimeType = "application/octet-stream"
 			}
-			s.newChannel(id, item.Name, item.MimeType, r.PathValue("runner_id"), r.PathValue("session_id"))
+			s.newChannel(id, item.Name, item.MimeType, r.PathValue("runner_id"), r.PathValue("session_id")).identity = identity
 			existing[item.Name] = id
 		}
 		ch := s.channels[id]

@@ -24,6 +24,7 @@ import (
 	"github.com/livepeer/node/cmd/version"
 	"github.com/livepeer/node/destination"
 	"github.com/livepeer/node/eth"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/nodeconfig"
 	"github.com/livepeer/node/nodeconfig/migrations"
 	"github.com/livepeer/node/pm"
@@ -272,6 +273,7 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 			return fmt.Errorf("configure payment RPC (LIVEPEER_ORCHESTRATOR_RPC_URL or --rpc-url-file): %w", err)
 		}
 		defer rpc.Close()
+		rpc.SetObserver(registry.metrics.RPC)
 		paymentChainID = new(big.Int).SetUint64(*p.ChainID)
 		if err := rpc.CheckChainID(parent, paymentChainID); err != nil {
 			return fmt.Errorf("verify payment RPC chain ID (check LIVEPEER_ORCHESTRATOR_RPC_URL or --rpc-url-file, --chain-id and --network): %w", err)
@@ -292,9 +294,11 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 		if p.ETHUSDFeed != nil {
 			rate, until, err := contracts.WeiPerUSD(parent, *p.ETHUSDFeed, p.PriceMaxAge)
 			if err != nil {
+				registry.metrics.Add("price_feed_updates_total", 1, observability.Labels{"outcome": "error"})
 				return fmt.Errorf("read ETH/USD price feed (check --eth-usd-feed, --price-max-age, and LIVEPEER_ORCHESTRATOR_RPC_URL or --rpc-url-file): %w", err)
 			}
 			registry.setRate(rate, until)
+			registry.metrics.Add("price_feed_updates_total", 1, observability.Labels{"outcome": "success"})
 		}
 		recipient := redeemerKey.Address()
 		if p.OrchestratorAddress != nil {
@@ -306,13 +310,22 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 		}
 	}
 	registry.proxyTemplate = p.ProxyURLTemplate
+	logger := slog.New(slog.NewTextHandler(logOut, nil))
+	registry.logger = logger.With("component", "orchestrator")
 	if err := loadStatic(p.RunnerConfig, registry); err != nil {
 		return fmt.Errorf("load static runners from %q (--runner-config or LIVEPEER_ORCHESTRATOR_RUNNER_CONFIG): %w", p.RunnerConfig, err)
 	}
-	logger := slog.New(slog.NewTextHandler(logOut, nil))
 	app := NewServer(registry, runnerPolicy, proxyPolicy, logger)
+	logger = app.logger
 	defer app.Close()
 	app.SetPayment(engine)
+	readiness := &paidReadiness{interval: p.HeartbeatInterval}
+	if engine != nil {
+		registry.metrics.Gauge("redemption_last_success_timestamp_seconds", nil).Set(0)
+		registry.metrics.Gauge("redemption_worker_last_completed_timestamp_seconds", nil).Set(0)
+		readiness.account = redeemerKey.Address()
+		redeemerDB.readiness = readiness
+	}
 	mainListener, err := net.Listen("tcp", p.Listen.String())
 	if err != nil {
 		return fmt.Errorf("cannot start orchestrator HTTP listener on %s; choose an available address with --listen or LIVEPEER_ORCHESTRATOR_LISTEN: %w", p.Listen, err)
@@ -329,14 +342,14 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
 	metricsMux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
+		if engine != nil && !readiness.ready(registry) {
+			http.Error(w, "orchestrator payment dependencies unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ready\n")
 	})
-	metricsMux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
-		runners, sessions := registry.Counts()
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = fmt.Fprintf(w, "livepeer_runners %d\nlivepeer_sessions %d\n", runners, sessions)
-	})
+	metricsMux.Handle("GET /metrics", registry.metrics.Handler())
 	ctx, cancel := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 	if engine != nil {
@@ -350,7 +363,7 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 	var workers sync.WaitGroup
 	workers.Go(func() { errs <- mainServer.Serve(mainListener) })
 	workers.Go(func() { errs <- metricsServer.Serve(metricsListener) })
-	logger.Info("orchestrator started", "listen", p.Listen, "metrics_listen", p.MetricsListen)
+	logger.Info("orchestrator started", "event", "started", "operation", "serve", "outcome", "success", "listen", p.Listen, "metrics_listen", p.MetricsListen)
 	// Independent bounded workers keep slow RPC/health calls off the billing
 	// and expiry paths. Every worker uses the shutdown context and is joined.
 	startWorker := func(period, timeout time.Duration, work func(context.Context)) {
@@ -372,25 +385,39 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 	startWorker(p.HeartbeatInterval, time.Second, func(context.Context) { registry.Expire() })
 	workers.Go(func() { app.runO2RKeepalives(ctx, 10*time.Second) })
 	if engine != nil {
+		startWorker(p.HeartbeatInterval, 30*time.Second, func(ctx context.Context) {
+			readiness.check(ctx, redeemerDB, paymentChain, engine, registry.metrics, logger)
+		})
 		if p.ETHUSDFeed != nil {
 			startWorker(time.Hour, 30*time.Second, func(ctx context.Context) {
 				rate, until, err := paymentChain.Contracts.WeiPerUSD(ctx, *p.ETHUSDFeed, p.PriceMaxAge)
 				if err != nil {
-					logger.Error("price feed unavailable", "error", err)
+					registry.metrics.Add("price_feed_updates_total", 1, observability.Labels{"outcome": "error"})
+					logger.Error("price feed unavailable", "event", "price_feed", "operation", "refresh", "outcome", "error", "error_kind", observability.ErrorKind(err))
 					return
 				}
 				registry.setRate(rate, until)
+				registry.metrics.Add("price_feed_updates_total", 1, observability.Labels{"outcome": "success"})
 			})
 		}
 		startWorker(time.Second, 5*time.Second, app.ChargePaidSessions)
 		startWorker(time.Minute, 5*time.Second, func(ctx context.Context) {
 			if err := engine.PruneControlState(ctx); err != nil {
-				logger.Error("payment retention", "error", err)
+				logger.Error("payment retention", "event", "payment_retention", "operation", "prune", "outcome", "error", "error_kind", observability.ErrorKind(err))
 			}
 		})
 		startWorker(p.HeartbeatInterval, 30*time.Second, func(ctx context.Context) {
-			for _, err := range ProcessRedemptions(ctx, redeemerDB, paymentChain, redeemerKey, paymentChainID) {
-				logger.Error("redemption", "error", err)
+			failures := ProcessRedemptions(ctx, redeemerDB, paymentChain, redeemerKey, paymentChainID)
+			for _, err := range failures {
+				registry.metrics.Add("redemption_errors_total", 1, observability.Labels{"error_kind": observability.ErrorKind(err)})
+				logger.Error("redemption failed", "event", "redemption_pass", "operation", "redeem", "outcome", "error", "error_kind", observability.ErrorKind(err))
+			}
+			readiness.mu.Lock()
+			readiness.workerCompleted = time.Now()
+			readiness.mu.Unlock()
+			registry.metrics.Gauge("redemption_worker_last_completed_timestamp_seconds", nil).Set(float64(time.Now().Unix()))
+			if len(failures) == 0 {
+				registry.metrics.Gauge("redemption_last_success_timestamp_seconds", nil).Set(float64(time.Now().Unix()))
 			}
 		})
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	testhelpers "github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
 	"github.com/stretchr/testify/require"
@@ -142,20 +143,44 @@ func TestAuthWebhookFailuresWithholdPayment(t *testing.T) {
 			logs.Reset()
 			before := calls.Load()
 			require.NoError(t, s.SetAuthWebhook(testURL(t, webhook.URL+path), nil))
+			outcome := "error"
+			switch path {
+			case "/price-limit", "/insufficient", "/denied", "/private-reason", "/private-failure":
+				outcome = "rejected"
+			}
+			beforeOutcome := testhelpers.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": outcome})
+			webhookOutcome := "error"
+			if outcome == "rejected" {
+				webhookOutcome = "denied"
+			}
+			beforeWebhook := testhelpers.MetricSum(t, s.metrics.Registry, "signer_auth_webhook_requests_total", map[string]string{"outcome": webhookOutcome})
 			response := postPayment(t, s, request)
 			requirePaymentFailure(t, response, test.want)
+			require.Equal(t, beforeOutcome+1, testhelpers.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": outcome}))
+			require.Equal(t, beforeWebhook+1, testhelpers.MetricSum(t, s.metrics.Registry, "signer_auth_webhook_requests_total", map[string]string{"outcome": webhookOutcome}))
 			require.Zero(t, countingKey.calls.Load(), "failed authorization must not sign tickets, segment credentials, or state")
 			require.NotContains(t, response.Body.String(), "private-webhook-detail")
 			require.NotEmpty(t, logs.String())
+			for _, line := range strings.Split(strings.TrimSpace(logs.String()), "\n") {
+				var fields map[string]any
+				require.NoError(t, json.Unmarshal([]byte(line), &fields))
+				for _, key := range []string{"component", "event", "operation", "outcome"} {
+					require.NotEmpty(t, fields[key], key)
+				}
+			}
 			require.NotContains(t, logs.String(), "private-webhook-detail")
 			if path == "/http-error" || path == "/redirect" {
 				require.Contains(t, logs.String(), `"http_status":`+strconv.Itoa(test.status))
 			}
 			if path == "/malformed" {
-				require.Contains(t, logs.String(), "invalid character")
+				require.Contains(t, logs.String(), "invalid_json")
 			}
 			if path == "/invalid-reason" {
-				require.Contains(t, logs.String(), "cannot unmarshal number")
+				require.Contains(t, logs.String(), "invalid_json_type")
+			}
+			if path == "/price-limit" {
+				require.Contains(t, logs.String(), `"outcome":"denied"`)
+				require.NotContains(t, logs.String(), `"outcome":"error"`)
 			}
 			if strings.HasPrefix(path, "/private-") || path == "/denied" {
 				require.Contains(t, response.Body.String(), "signer auth rejected request with status "+strconv.Itoa(test.want))
@@ -173,6 +198,9 @@ func TestAuthWebhookFailuresWithholdPayment(t *testing.T) {
 	require.Zero(t, countingKey.calls.Load())
 	require.NotContains(t, response.Body.String(), "private-webhook-detail")
 	require.Contains(t, logs.String(), "signer auth webhook unavailable")
-	require.Contains(t, logs.String(), "private-webhook-detail")
-	require.Contains(t, logs.String(), "connection refused")
+	require.NotContains(t, logs.String(), "private-webhook-detail")
+	require.Contains(t, logs.String(), "connection_refused")
+	require.Zero(t, testhelpers.MetricSum(t, s.metrics.Registry, "signer_sign_operations_total", nil))
+	require.Zero(t, testhelpers.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": "success"}))
+	require.EqualValues(t, len(tests)+1, testhelpers.MetricSum(t, s.metrics.Registry, "signer_auth_webhook_requests_total", nil))
 }

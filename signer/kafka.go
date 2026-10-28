@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -14,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/livepeer/node/internal/observability"
 	"github.com/segmentio/kafka-go"
 	"github.com/segmentio/kafka-go/sasl/plain"
 	"github.com/segmentio/kafka-go/sasl/scram"
@@ -139,6 +139,8 @@ type kafkaProducer struct {
 	enqueueFailures atomic.Uint64
 	publishFailures atomic.Uint64
 	storageFailures atomic.Uint64
+	deliveredEvents atomic.Uint64
+	lastDelivery    atomic.Int64
 }
 
 func (c KafkaConfig) transport() (*kafka.Transport, error) {
@@ -240,6 +242,8 @@ func (p *kafkaProducer) publish(ctx context.Context) (bool, error) {
 		p.storageFailures.Add(1)
 		return false, err
 	}
+	p.deliveredEvents.Add(uint64(len(events)))
+	p.lastDelivery.Store(time.Now().Unix())
 	return true, nil
 }
 
@@ -257,7 +261,7 @@ func (p *kafkaProducer) run(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			slog.WarnContext(ctx, "signer Kafka delivery failed; accounting events retained", "retry_after", backoff, "error", err)
+			slog.With("component", "signer", "event", "accounting_delivery", "operation", "accounting_delivery").WarnContext(ctx, "signer Kafka delivery failed; accounting events retained", "retry_after", backoff, "outcome", "error", "error_kind", observability.ErrorKind(err))
 			delay, wake = backoff, nil
 			backoff = min(backoff*2, 30*time.Second)
 		}
@@ -273,25 +277,28 @@ func (p *kafkaProducer) ready(ctx context.Context) bool {
 	return p == nil || p.outbox.ready(ctx)
 }
 
-func (p *kafkaProducer) metrics(ctx context.Context, w io.Writer) {
+func (p *kafkaProducer) collectMetrics(emit observability.Emit) {
 	if p == nil {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
 	stats, err := p.outbox.stats(ctx)
-	if err != nil {
-		_, _ = io.WriteString(w, "livepeer_signer_kafka_outbox_healthy 0\n")
-	} else {
+	emit("signer_kafka_outbox_healthy", observability.Bool(err == nil && !p.outbox.unhealthy.Load()), nil)
+	if err == nil {
 		age := 0.0
 		if !stats.Oldest.IsZero() {
 			age = max(time.Since(stats.Oldest).Seconds(), 0)
 		}
-		healthy := 1
-		if p.outbox.unhealthy.Load() {
-			healthy = 0
-		}
-		_, _ = fmt.Fprintf(w, "livepeer_signer_kafka_outbox_healthy %d\nlivepeer_signer_kafka_pending_events %d\nlivepeer_signer_kafka_pending_bytes %d\nlivepeer_signer_kafka_oldest_event_age_seconds %g\n", healthy, stats.Count, stats.Bytes, age)
+		emit("signer_kafka_pending_events", float64(stats.Count), nil)
+		emit("signer_kafka_pending_bytes", float64(stats.Bytes), nil)
+		emit("signer_kafka_oldest_event_age_seconds", age, nil)
 	}
-	_, _ = fmt.Fprintf(w, "livepeer_signer_kafka_publish_errors_total %d\nlivepeer_signer_kafka_enqueue_errors_total %d\nlivepeer_signer_kafka_storage_errors_total %d\n", p.publishFailures.Load(), p.enqueueFailures.Load(), p.storageFailures.Load())
+	emit("signer_kafka_publish_errors_total", float64(p.publishFailures.Load()), nil)
+	emit("signer_kafka_enqueue_errors_total", float64(p.enqueueFailures.Load()), nil)
+	emit("signer_kafka_storage_errors_total", float64(p.storageFailures.Load()), nil)
+	emit("signer_kafka_delivered_events_total", float64(p.deliveredEvents.Load()), observability.Labels{"component": "signer"})
+	emit("signer_kafka_last_delivery_timestamp_seconds", float64(p.lastDelivery.Load()), observability.Labels{"component": "signer"})
 }
 
 // Call after run has exited; network operations are bounded by the writer's

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/trickle"
 )
 
@@ -14,6 +15,7 @@ const o2rKeepaliveMessage = `{"keep":"alive"}`
 // channel tracks ownership; trickle.Server owns the stream and its segments.
 type channel struct {
 	name, mime, runnerID, sessionID string
+	identity                        observability.Identity
 	publisher                       *trickle.TrickleLocalPublisher
 }
 

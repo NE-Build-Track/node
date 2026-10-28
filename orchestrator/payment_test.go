@@ -130,6 +130,13 @@ func TestPaidFixedSessionWithRemoteSigner(t *testing.T) {
 	followup := httptest.NewRequest(http.MethodPost, challenge.PaymentURL, nil)
 	server.ServeHTTP(w, followup)
 	require.Equal(t, 409, w.Code)
+	require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "payment_tickets_total", map[string]string{"kind": "accepted"}))
+	require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "payment_fixed_charges_total", map[string]string{"app": "demo"}))
+	for range 3 {
+		server.ChargePaidSessions(t.Context())
+	}
+	require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "payment_operations_total", map[string]string{"operation": "charge"}), "scheduler ticks must not count another fixed-price debit")
+	require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "payment_operations_total", map[string]string{"operation": "receive", "outcome": "success"}))
 }
 
 func TestPinnedPythonPaidSingleShot(t *testing.T) {

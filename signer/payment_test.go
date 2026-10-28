@@ -36,7 +36,7 @@ func TestPaymentEncoding(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			draft, err := s.preparePayment(t.Context(), kind, info.Auth.SessionID, info, paymentState{}, -1, time.Now())
 			require.NoError(t, err)
-			signed, err := draft.Sign(t.Context(), key)
+			signed, err := draft.Sign(t.Context(), key, nil)
 			require.NoError(t, err)
 			require.Equal(t, fixtures[kind].Payment, signed.Payment)
 			require.Equal(t, fixtures[kind].SegCreds, signed.SegCreds)
@@ -77,7 +77,7 @@ func TestDraftPaymentPreservesValues(t *testing.T) {
 			}
 			info.Price.PricePerUnit = 999
 			info.Auth.Expiration = 0
-			signed, err := draft.Sign(t.Context(), s.key)
+			signed, err := draft.Sign(t.Context(), s.key, nil)
 			require.NoError(t, err)
 			paymentBytes, err := base64.StdEncoding.DecodeString(signed.Payment)
 			require.NoError(t, err)
@@ -129,7 +129,7 @@ func TestRecipientReservesWinningLiabilityAcrossConcurrentSessions(t *testing.T)
 		require.NoError(t, err)
 		draft, err := s.preparePayment(t.Context(), "fixed", manifest, info, paymentState{}, -1, time.Now())
 		require.NoError(t, err)
-		payment, err := draft.Sign(t.Context(), key)
+		payment, err := draft.Sign(t.Context(), key, nil)
 		require.NoError(t, err)
 		payments[manifest] = payment
 	}

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	discovery "github.com/livepeer/node/discovery/shared"
+	"github.com/livepeer/node/internal/observability"
 )
 
 type orchestratorWebhook struct {
@@ -110,7 +111,7 @@ func (h *orchestratorWebhook) refresh(ctx context.Context, transport http.RoundT
 		}
 	} else if ctx.Err() == nil {
 		// fetch never returns a URL, credentials, or response body in errors.
-		slog.WarnContext(ctx, "signer orchestrator webhook refresh failed; retaining cached list", "error", err)
+		slog.With("component", "signer", "event", "orchestrator_webhook", "operation", "orchestrator_webhook").WarnContext(ctx, "signer orchestrator webhook refresh failed; retaining cached list", "outcome", "error", "error_kind", observability.ErrorKind(err))
 	}
 	h.mu.Lock()
 	close(h.refreshing)

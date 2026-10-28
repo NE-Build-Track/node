@@ -107,7 +107,12 @@ func (s *RedeemerDB) setTicketPhase(ctx context.Context, sig []byte, phase strin
 	if terminalRedemption(phase) {
 		return s.finishTicket(ctx, sig, phase, "")
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO redemption_attempts(sig,attempted_at,phase) VALUES(?,?,?) ON CONFLICT(sig) DO UPDATE SET phase=excluded.phase WHERE redemption_attempts.phase IN ('retryable','awaiting_finality')`, sig, time.Now().UTC().Format(time.RFC3339Nano), phase)
+	result, err := s.db.ExecContext(ctx, `INSERT INTO redemption_attempts(sig,attempted_at,phase) VALUES(?,?,?) ON CONFLICT(sig) DO UPDATE SET phase=excluded.phase WHERE redemption_attempts.phase IN ('retryable','awaiting_finality') AND redemption_attempts.phase!=excluded.phase`, sig, time.Now().UTC().Format(time.RFC3339Nano), phase)
+	if err == nil {
+		if n, _ := result.RowsAffected(); n > 0 {
+			s.observeTransition(phase, "", nil)
+		}
+	}
 	return err
 }
 

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"math/big"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/livepeer/node/destination"
 	discovery "github.com/livepeer/node/discovery/shared"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/pm"
 )
 
@@ -105,6 +107,7 @@ type runner struct {
 }
 
 type session struct {
+	identity  observability.Identity
 	pending   bool
 	ID        string
 	Token     string
@@ -116,6 +119,16 @@ type session struct {
 }
 
 var errInvalidSessionToken = errors.New("invalid session token")
+var errRunnerUnavailable = errors.New("runner unavailable")
+
+var (
+	errRunnerCapacity  = errors.New("runner at capacity")
+	errSessionCapacity = errors.New("session capacity reached")
+)
+
+func capacityError(err error) bool {
+	return errors.Is(err, errRunnerCapacity) || errors.Is(err, errSessionCapacity)
+}
 
 // runnerStopped bounds the time existing proxy requests have to finish.
 type runnerStopped struct{ deadline time.Time }
@@ -128,6 +141,9 @@ type sessionProxy struct {
 }
 
 type Registry struct {
+	logger        *slog.Logger
+	metrics       *observability.Metrics
+	server        *Server
 	mu            sync.Mutex
 	runners       map[string]*runner
 	secret        string
@@ -145,7 +161,14 @@ type Registry struct {
 const maxRunners = 256
 
 func NewRegistry(secret, service string, interval, ttl time.Duration) *Registry {
-	return &Registry{runners: make(map[string]*runner), secret: secret, service: strings.TrimRight(service, "/"), interval: interval, ttl: ttl}
+	r := &Registry{metrics: observability.New("orchestrator"), runners: make(map[string]*runner), secret: secret, service: strings.TrimRight(service, "/"), interval: interval, ttl: ttl}
+	r.metrics.Snapshot(r.collectMetrics)
+	r.metrics.Legacy(func(emit observability.Emit) {
+		runners, sessions := r.Counts()
+		emit("runners", float64(runners), nil)
+		emit("sessions", float64(sessions), nil)
+	})
+	return r
 }
 
 func (r *Registry) runnerServiceURL() string {
@@ -165,6 +188,7 @@ func (r *Registry) setRate(rate *big.Rat, until time.Time) {
 	defer r.mu.Unlock()
 	r.weiPerUSD = new(big.Rat).Set(rate)
 	r.rateUntil = until
+	r.metrics.Gauge("price_feed_valid_until_timestamp_seconds", nil).Set(float64(until.Unix()) * observability.Bool(!until.IsZero()))
 	for _, item := range r.runners {
 		quote := item.USDQuote
 		item.PriceError = normalizePriceAt(&quote, r.weiPerUSD) != nil
@@ -359,6 +383,7 @@ func (r *Registry) Heartbeat(req heartbeatRequest, auth string) (heartbeatRespon
 	resp := heartbeatResponse{RunnerID: req.RunnerID, Orchestrator: r.runnerServiceURL(), HeartbeatInterval: r.interval.String(), HeartbeatTTL: r.ttl.String(), SessionIDs: ids}
 	if initial {
 		resp.HeartbeatSecret = current.Credential
+		r.runnerEvent(req.RunnerID, current, "registered")
 	}
 	return resp, http.StatusOK, nil
 }
@@ -374,11 +399,12 @@ func (r *Registry) Unregister(id, auth string) (int, error) {
 		return http.StatusUnauthorized, errors.New("invalid runner credential")
 	}
 	for sid := range current.Sessions {
-		r.releaseLocked(id, sid, nil)
+		r.releaseLocked(id, sid, nil, "runner_unregistered")
 	}
 	if r.onEvent != nil {
 		r.onEvent(id, "unregistered", "", "")
 	}
+	r.runnerEvent(id, current, "unregistered")
 	delete(r.runners, id)
 	return http.StatusOK, nil
 }
@@ -441,10 +467,24 @@ func (r *Registry) ReserveWithID(id, requestedID string) (string, string, string
 	return r.reserveWithPrice(id, requestedID, nil)
 }
 
-func (r *Registry) reserveWithPrice(id, requestedID string, agreed *priceInfo) (string, string, string, int, error) {
+func (r *Registry) reserveWithPrice(id, requestedID string, agreed *priceInfo) (sid, app, control string, status int, result error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	item := r.runners[id]
+	if item != nil {
+		defer func() {
+			outcome := "success"
+			if result != nil {
+				outcome = "rejected"
+				if capacityError(result) {
+					outcome = "capacity"
+				} else if status == 503 {
+					outcome = "unavailable"
+				}
+			}
+			r.metrics.Add("session_reservations_total", 1, runnerIdentity(id, item).Labels().With("outcome", outcome))
+		}()
+	}
 	if item == nil || !r.usable(item) {
 		return "", "", "", http.StatusNotFound, errors.New("runner unavailable")
 	}
@@ -459,10 +499,10 @@ func (r *Registry) reserveWithPrice(id, requestedID string, agreed *priceInfo) (
 		total += len(registered.Sessions)
 	}
 	if total >= 10000 {
-		return "", "", "", http.StatusServiceUnavailable, errors.New("session capacity reached")
+		return "", "", "", http.StatusServiceUnavailable, errSessionCapacity
 	}
 	if len(item.Sessions) >= item.Capacity {
-		return "", "", "", http.StatusServiceUnavailable, errors.New("runner at capacity")
+		return "", "", "", http.StatusServiceUnavailable, errRunnerCapacity
 	}
 	sessionID := requestedID
 	if sessionID == "" {
@@ -484,7 +524,7 @@ func (r *Registry) reserveWithPrice(id, requestedID string, agreed *priceInfo) (
 		price = *agreed
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
-	item.Sessions[sessionID] = &session{pending: agreed != nil, ID: sessionID, Token: token, Created: time.Now(), Proxies: map[string]sessionProxy{}, PriceInfo: price, ctx: ctx, cancel: cancel}
+	item.Sessions[sessionID] = &session{identity: runnerIdentity(id, item), pending: agreed != nil, ID: sessionID, Token: token, Created: time.Now(), Proxies: map[string]sessionProxy{}, PriceInfo: price, ctx: ctx, cancel: cancel}
 	appURL := r.appURL(id, item.Mode, sessionID)
 	if item.Proxy && item.Mode == "persistent" {
 		target, _ := url.Parse(item.RunnerURL)
@@ -550,12 +590,12 @@ func (r *Registry) PaidSessions() []string {
 	return ids
 }
 
-func (r *Registry) ReleaseBySession(sid string) {
+func (r *Registry) ReleaseBySession(sid string, reasons ...string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for id, item := range r.runners {
 		if item.Sessions[sid] != nil {
-			r.releaseLocked(id, sid, nil)
+			r.releaseLocked(id, sid, nil, reasons...)
 			return
 		}
 	}
@@ -572,21 +612,37 @@ func (r *Registry) release(id, sid, token string, callback bool) (int, error) {
 		return http.StatusUnauthorized, errInvalidSessionToken
 	}
 	var cause error
+	reason := "client_stop"
 	if callback {
-		cause = runnerStopped{deadline: time.Now().Add(time.Second)}
+		cause, reason = runnerStopped{deadline: time.Now().Add(time.Second)}, "runner_stop"
 	}
-	r.releaseLocked(id, sid, cause)
+	r.releaseLocked(id, sid, cause, reason)
 	return http.StatusOK, nil
 }
 
 // releaseLocked is the single teardown path for capacity and active requests.
 // The caller holds r.mu; cancellation never waits for the request to finish.
-func (r *Registry) releaseLocked(id, sid string, cause error) {
+func (r *Registry) releaseLocked(id, sid string, cause error, reasons ...string) {
 	item := r.runners[id]
 	if item == nil || item.Sessions[sid] == nil {
 		return
 	}
-	item.Sessions[sid].cancel(cause)
+	sess := item.Sessions[sid]
+	reason := "released"
+	if len(reasons) != 0 {
+		reason = reasons[0]
+	}
+	if sess.pending && (reason == "released" || reason == "completed") {
+		reason = "reservation_failed"
+	}
+	r.metrics.Add("session_ends_total", 1, sess.identity.Labels().With("reason", reason))
+	if !sess.pending {
+		r.metrics.Observe("session_duration_seconds", time.Since(sess.Created).Seconds(), sess.identity.Labels())
+	}
+	if r.logger != nil {
+		r.logger.Info("session ended", "event", "session_ended", "operation", "release", "outcome", reason, "app", sess.identity.App, "runner_id", id, "session_id", sid)
+	}
+	sess.cancel(cause)
 	delete(item.Sessions, sid)
 	if r.onEvent != nil {
 		r.onEvent(id, "released", sid, "")
@@ -609,7 +665,7 @@ func (r *Registry) Close() {
 	r.closed = true
 	for id, item := range r.runners {
 		for sid := range item.Sessions {
-			r.releaseLocked(id, sid, nil)
+			r.releaseLocked(id, sid, nil, "shutdown")
 		}
 		if r.onEvent != nil {
 			r.onEvent(id, "unregistered", "", "")
@@ -681,11 +737,12 @@ func (r *Registry) Expire() {
 	for id, item := range r.runners {
 		if !item.Static && time.Since(item.Last) > r.ttl {
 			for sid := range item.Sessions {
-				r.releaseLocked(id, sid, nil)
+				r.releaseLocked(id, sid, errRunnerUnavailable, "runner_expired")
 			}
 			if r.onEvent != nil {
 				r.onEvent(id, "expired", "", "")
 			}
+			r.runnerEvent(id, item, "expired")
 			delete(r.runners, id)
 		}
 	}
@@ -745,6 +802,7 @@ func (r *Registry) AddStatic(config StaticRunner) error {
 		return errors.New("static runner capacity reached")
 	}
 	r.runners[config.ID] = &runner{USDQuote: quote, heartbeatRequest: req, Static: true, Healthy: config.HealthURL == "", HealthURL: config.HealthURL, HealthCode: config.HealthCode, Sessions: map[string]*session{}}
+	r.runnerEvent(config.ID, r.runners[config.ID], "registered")
 	return nil
 }
 
@@ -792,16 +850,24 @@ func (r *Registry) checkStaticHealth(ctx context.Context, client *http.Client, i
 	}
 	r.mu.Lock()
 	if item := r.runners[id]; item != nil && item.Static {
+		r.metrics.Add("runner_health_checks_total", 1, runnerIdentity(id, item).Labels().With("outcome", map[bool]string{true: "success", false: "error"}[healthy]))
 		if healthy {
 			item.healthFailures = 0
 		} else {
 			item.healthFailures++
 			healthy = item.Healthy && item.healthFailures < 3
 		}
+		if item.Healthy != healthy {
+			event := "unhealthy"
+			if healthy {
+				event = "healthy"
+			}
+			r.runnerEvent(id, item, event)
+		}
 		item.Healthy = healthy
 		if !healthy {
 			for sid := range item.Sessions {
-				r.releaseLocked(id, sid, nil)
+				r.releaseLocked(id, sid, errRunnerUnavailable, "runner_unhealthy")
 			}
 		}
 	}

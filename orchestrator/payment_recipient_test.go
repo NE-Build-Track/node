@@ -6,9 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"math/big"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -16,6 +20,8 @@ import (
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/livepeer/node/eth"
+	"github.com/livepeer/node/internal/observability"
+	"github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
 	"github.com/stretchr/testify/require"
@@ -62,19 +68,25 @@ func TestRecipientHMACMatchesGoLivepeer(t *testing.T) {
 }
 
 type recipientTestChain struct {
-	block  int64
-	active bool
+	block                  int64
+	active                 bool
+	snapshotErr, activeErr error
+	funds                  func(context.Context, pm.PayerFunds) (pm.PayerFunds, error)
 }
 
 func (c *recipientTestChain) Snapshot(context.Context) (pm.ChainSnapshot, error) {
-	return pm.ChainSnapshot{Block: big.NewInt(c.block), Round: big.NewInt(5), RoundHash: ethcommon.HexToHash("0x1234")}, nil
+	return pm.ChainSnapshot{Block: big.NewInt(c.block), Round: big.NewInt(5), RoundHash: ethcommon.HexToHash("0x1234")}, c.snapshotErr
 }
 func (c *recipientTestChain) IsActiveAt(context.Context, ethcommon.Address, pm.ChainSnapshot) (bool, error) {
-	return c.active, nil
+	return c.active, c.activeErr
 }
 func (c *recipientTestChain) PayerFunds(ctx context.Context, _, _ ethcommon.Address) (pm.PayerFunds, error) {
 	snapshot, err := c.Snapshot(ctx)
-	return pm.PayerFunds{Snapshot: snapshot, Deposit: big.NewInt(1000000000), Reserve: big.NewInt(1000000000), WithdrawRound: new(big.Int)}, err
+	funds := pm.PayerFunds{Snapshot: snapshot, Deposit: big.NewInt(1000000000), Reserve: big.NewInt(1000000000), WithdrawRound: new(big.Int)}
+	if c.funds != nil {
+		return c.funds(ctx, funds)
+	}
+	return funds, err
 }
 
 func newRecipientTestEngine(t *testing.T) (*PaymentEngine, *recipientTestChain, *ecdsa.PrivateKey, string) {
@@ -102,7 +114,7 @@ func issueRecipientParams(t *testing.T, e *PaymentEngine, key *ecdsa.PrivateKey)
 	return info
 }
 
-func receiveRecipientPayment(t *testing.T, e *PaymentEngine, key *ecdsa.PrivateKey, info wire.OrchestratorInfo, nonces ...uint32) error {
+func recipientPayment(t *testing.T, key *ecdsa.PrivateKey, info wire.OrchestratorInfo, nonces ...uint32) (wire.Payment, wire.SegData) {
 	t.Helper()
 	payer := crypto.PubkeyToAddress(key.PublicKey)
 	p := info.TicketParams
@@ -122,17 +134,15 @@ func receiveRecipientPayment(t *testing.T, e *PaymentEngine, key *ecdsa.PrivateK
 	hash := crypto.Keccak256(nil)
 	flatten := append([]byte(info.Auth.SessionID), make([]byte, 32)...)
 	flatten = append(flatten, hash...)
-	segment := wire.SegData{ManifestID: []byte(info.Auth.SessionID), Hash: hash, Signature: sign(flatten), Auth: info.Auth}
-	receive := func() error {
-		_, _, err := e.Receive(t.Context(), "runner", info.Auth.SessionID, base64.StdEncoding.EncodeToString(wire.EncodePayment(payment)), base64.StdEncoding.EncodeToString(wire.EncodeSegData(segment)))
-		return err
-	}
-	require.ErrorIs(t, receive(), ErrInvalidPayment, "unhashed credentials")
-	segment.Signature = sign(crypto.Keccak256(flatten))
-	segment.Hash[0] ^= 1
-	require.ErrorIs(t, receive(), ErrInvalidPayment, "tampered payload hash")
-	segment.Hash[0] ^= 1
-	return receive()
+	segment := wire.SegData{ManifestID: []byte(info.Auth.SessionID), Hash: hash, Signature: sign(crypto.Keccak256(flatten)), Auth: info.Auth}
+	return payment, segment
+}
+
+func receiveRecipientPayment(t *testing.T, e *PaymentEngine, key *ecdsa.PrivateKey, info wire.OrchestratorInfo, nonces ...uint32) error {
+	t.Helper()
+	payment, segment := recipientPayment(t, key, info, nonces...)
+	_, _, err := e.Receive(t.Context(), "runner", info.Auth.SessionID, base64.StdEncoding.EncodeToString(wire.EncodePayment(payment)), base64.StdEncoding.EncodeToString(wire.EncodeSegData(segment)))
+	return err
 }
 
 func TestRecipientHMACExpirationCopies(t *testing.T) {
@@ -221,6 +231,7 @@ func TestRecipientHMACRejectsTamperedParameters(t *testing.T) {
 
 func TestRecipientBatchReplayAndExpiry(t *testing.T) {
 	e, chain, key, _ := newRecipientTestEngine(t)
+	e.metrics = observability.New("orchestrator")
 	info := issueRecipientParams(t, e, key)
 	require.ErrorIs(t, receiveRecipientPayment(t, e, key, info, 1, 1), ErrInvalidPayment)
 	balance, err := e.Balance("session")
@@ -236,8 +247,11 @@ func TestRecipientBatchReplayAndExpiry(t *testing.T) {
 	before, err := e.Balance("session")
 	require.NoError(t, err)
 	require.Positive(t, before.Sign(), "callers must not mutate accounting state")
+	challenges := test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "challenge"})
 	_, err = e.RefreshChallenge(t.Context(), "session", crypto.PubkeyToAddress(key.PublicKey), "https://orch.example")
 	require.NoError(t, err)
+	require.Equal(t, challenges, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "challenge"}))
+	require.EqualValues(t, 1, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "refresh", "outcome": "success"}))
 	// A newer valid auth token cannot reset nonce tracking for old PM params.
 	info.Auth = e.authToken("session", time.Now().Add(2*time.Hour).Unix())
 	require.ErrorIs(t, receiveRecipientPayment(t, e, key, info, 1), ErrInvalidPayment)
@@ -253,6 +267,8 @@ func TestRecipientBatchReplayAndExpiry(t *testing.T) {
 	require.ErrorIs(t, receiveRecipientPayment(t, e, key, info, 1), ErrInvalidPayment, "a backward observation cannot revive pruned replay state")
 	newInfo := issueRecipientParams(t, e, key)
 	require.NoError(t, receiveRecipientPayment(t, e, key, newInfo, 1))
+	require.EqualValues(t, 3, test.MetricSum(t, e.metrics.Registry, "payment_tickets_total", map[string]string{"kind": "accepted"}))
+	require.EqualValues(t, 3, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "receive", "outcome": "success"}))
 }
 
 func TestRecipientRestartRotatesSecretsAndPreservesWinningTickets(t *testing.T) {
@@ -312,11 +328,14 @@ func TestRecipientRejectsParametersOnceRedemptionPrepared(t *testing.T) {
 
 func TestRecipientStorageFailureDoesNotPublishCreditOrConsumeNonces(t *testing.T) {
 	e, _, key, _ := newRecipientTestEngine(t)
+	e.metrics = observability.New("orchestrator")
 	info := issueRecipientParams(t, e, key)
 	_, err := e.store.db.Exec(`CREATE TRIGGER reject_second_ticket BEFORE INSERT ON winning_tickets
 		WHEN NEW.ticket_nonce=2 BEGIN SELECT RAISE(ABORT, 'storage failure'); END`)
 	require.NoError(t, err)
 	require.ErrorContains(t, receiveRecipientPayment(t, e, key, info, 1, 2), "storage failure")
+	require.EqualValues(t, 1, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "receive", "outcome": "error"}))
+	require.Zero(t, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "receive", "outcome": "success"}))
 	count, err := e.store.WinningTicketCount(crypto.PubkeyToAddress(key.PublicKey), 0)
 	require.NoError(t, err)
 	require.Zero(t, count, "partial inserts must roll back")
@@ -330,4 +349,125 @@ func TestRecipientStorageFailureDoesNotPublishCreditOrConsumeNonces(t *testing.T
 	count, err = e.store.WinningTicketCount(crypto.PubkeyToAddress(key.PublicKey), 0)
 	require.NoError(t, err)
 	require.Equal(t, 2, count)
+}
+
+func TestPaidFailureOutcomes(t *testing.T) {
+	for _, cause := range []string{
+		"funding", "withdrawal", "face_value", "liability", "capacity", "rpc", "storage",
+		"cancelled", "unhashed segment", "tampered hash", "challenge snapshot",
+		"challenge active", "challenge cancelled", "challenge timeout", "challenge capacity",
+	} {
+		t.Run(cause, func(t *testing.T) {
+			e, chain, key, _ := newRecipientTestEngine(t)
+			registry, server := reviewServer(t, "http://127.0.0.1:1")
+			defer server.Close()
+			registry.SetWeiPerUSD(big.NewRat(1, 1))
+			require.NoError(t, registry.AddStatic(StaticRunner{ID: "runner", App: "model", Mode: "single-shot", RunnerURL: "http://127.0.0.1:1", Capacity: 1, PriceInfo: priceInfo{Price: "9", Currency: "usd", Unit: "fixed"}}))
+			server.SetPayment(e)
+			info := issueRecipientParams(t, e, key)
+			nonces := []uint32{1}
+			operation, outcome, appOutcome := "receive", "rejected", "rejected"
+			switch cause {
+			case "capacity":
+				e.nonceCount = 1000000
+				outcome, appOutcome = "capacity", "capacity"
+			case "rpc", "storage":
+				outcome, appOutcome = "error", "error"
+			case "cancelled":
+				outcome, appOutcome = "cancelled", "client_cancelled"
+			case "challenge capacity":
+				for n := range 100000 {
+					e.sessions[strconv.Itoa(n)] = nil
+				}
+				operation, outcome, appOutcome = "challenge", "capacity", "capacity"
+			case "challenge snapshot":
+				chain.snapshotErr = syscall.ECONNREFUSED
+				operation, outcome, appOutcome = "challenge", "connection_refused", "error"
+			case "challenge active":
+				chain.activeErr = errors.New("RPC unavailable")
+				operation, outcome, appOutcome = "challenge", "error", "error"
+			case "challenge cancelled":
+				chain.snapshotErr = context.Canceled
+				operation, outcome, appOutcome = "challenge", "cancelled", "client_cancelled"
+			case "challenge timeout":
+				chain.snapshotErr = context.DeadlineExceeded
+				operation, outcome, appOutcome = "challenge", "timeout", "error"
+			case "liability":
+				require.NoError(t, receiveRecipientPayment(t, e, key, info, 1))
+				nonces = []uint32{2, 3}
+			}
+			chain.funds = func(ctx context.Context, funds pm.PayerFunds) (pm.PayerFunds, error) {
+				switch cause {
+				case "funding":
+					funds.Reserve.SetInt64(0)
+				case "withdrawal":
+					funds.WithdrawRound.Set(funds.Snapshot.Round)
+				case "face_value":
+					funds.Deposit.SetInt64(1)
+				case "liability":
+					funds.Deposit.SetInt64(10)
+					funds.Reserve.SetInt64(10)
+				case "rpc":
+					return pm.PayerFunds{}, errors.New("RPC unavailable")
+				case "cancelled":
+					return pm.PayerFunds{}, ctx.Err()
+				}
+				return funds, nil
+			}
+			if cause == "storage" {
+				_, err := e.store.db.Exec(`CREATE TRIGGER reject_ticket BEFORE INSERT ON winning_tickets BEGIN SELECT RAISE(ABORT,'storage failure'); END`)
+				require.NoError(t, err)
+			}
+			status := 400
+			request := httptest.NewRequest("POST", "/apps/runner/app", nil)
+			if operation == "receive" {
+				payment, segment := recipientPayment(t, key, info, nonces...)
+				if cause == "unhashed segment" {
+					flatten := append(append([]byte(info.Auth.SessionID), make([]byte, 32)...), segment.Hash...)
+					signature, err := crypto.Sign(accounts.TextHash(flatten), key)
+					require.NoError(t, err)
+					signature[64] += 27
+					segment.Signature, status = signature, 403
+				} else if cause == "tampered hash" {
+					segment.Hash[0] ^= 1
+					status = 403
+				}
+				request.Header.Set("Livepeer-Payment", base64.StdEncoding.EncodeToString(wire.EncodePayment(payment)))
+				request.Header.Set("Livepeer-Segment", base64.StdEncoding.EncodeToString(wire.EncodeSegData(segment)))
+			} else {
+				status = 502
+				request.Header.Set("Livepeer-Payer-Address", crypto.PubkeyToAddress(key.PublicKey).Hex())
+			}
+			if cause == "cancelled" {
+				ctx, cancel := context.WithCancel(t.Context())
+				cancel()
+				request = request.WithContext(ctx)
+			}
+			response := httptest.NewRecorder()
+			server.ServeHTTP(response, request)
+			require.Equal(t, status, response.Code, response.Body.String())
+			require.EqualValues(t, 1, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": operation, "outcome": outcome}))
+			require.EqualValues(t, 1, test.MetricSum(t, e.metrics.Registry, "app_calls_total", map[string]string{"outcome": appOutcome}))
+			require.Zero(t, test.MetricSum(t, e.metrics.Registry, "upstream_requests_total", nil))
+		})
+	}
+
+}
+
+func TestLiveChargeObservesOnlyDebitAttempts(t *testing.T) {
+	e, _, key, _ := newRecipientTestEngine(t)
+	e.metrics = observability.New("orchestrator")
+	_, err := e.MakeChallenge(t.Context(), "runner", "session", crypto.PubkeyToAddress(key.PublicKey), 9, "seconds", "https://orch.example")
+	require.NoError(t, err)
+	e.sessions["session"].balance.SetInt64(18)
+	now := time.Now()
+	require.NoError(t, e.Charge(t.Context(), "session", now))
+	for range 3 {
+		require.NoError(t, e.Charge(t.Context(), "session", now.Add(100*time.Millisecond)))
+	}
+	require.Zero(t, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "charge"}))
+	require.NoError(t, e.Charge(t.Context(), "session", now.Add(time.Second)))
+	require.ErrorIs(t, e.Charge(t.Context(), "session", now.Add(3*time.Second)), ErrInsufficientBalance)
+	require.EqualValues(t, 1, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "charge", "outcome": "success"}))
+	require.EqualValues(t, 1, test.MetricSum(t, e.metrics.Registry, "payment_operations_total", map[string]string{"operation": "charge", "outcome": "insufficient_balance"}))
 }

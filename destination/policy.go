@@ -14,6 +14,9 @@ import (
 	"time"
 )
 
+// ErrDeniedAddress identifies a destination blocked by the grants policy.
+var ErrDeniedAddress = errors.New("destination contains a denied address; configure grants for this purpose")
+
 var deniedV4 = mustPrefixes(
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
 	"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
@@ -149,7 +152,7 @@ func (p Policy) DialContext(ctx context.Context, network, address string) (net.C
 	}
 	for _, ip := range ips {
 		if !Public(ip) && !p.granted(net.JoinHostPort(ip.String(), port)) {
-			return nil, fmt.Errorf("%s destination contains a denied address; configure grants for this purpose", p.Purpose)
+			return nil, fmt.Errorf("%s %w", p.Purpose, ErrDeniedAddress)
 		}
 	}
 	dialer := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}

@@ -97,37 +97,28 @@ func TestLocalSubscriber_PreconnectOnEmpty(t *testing.T) {
 	defer pub.Close()
 
 	sub := NewLocalSubscriber(server, "testest")
-	done := make(chan struct{})
-
-	go func() {
-		defer close(done)
-		require.Nil(pub.Write(bytes.NewReader([]byte("hello"))))
-		require.Nil(pub.Close())
-	}()
-
-	setSeqCount := 0
-
-	for i := 0; ; i++ {
+	for seq, payload := range []string{"hello", ""} {
+		// Select the next segment before the publisher can advance past it.
 		sub.SetSeq(-1)
 		td, err := sub.Read()
-		if err != nil && err.Error() == "stream not found" {
-			// would be better if this would be EOS but roll with it for now
-			break
-		}
 		require.Nil(err)
-		require.Equal(strconv.Itoa(setSeqCount), td.Metadata["Lp-Trickle-Seq"])
+		require.Equal(strconv.Itoa(seq), td.Metadata["Lp-Trickle-Seq"])
+		require.Nil(pub.Write(bytes.NewReader([]byte(payload))))
 
 		n, err := io.Copy(io.Discard, td.Reader)
 		require.Nil(err)
-		if i == 0 {
-			require.Equal(5, int(n)) // first post - "hello"
-		} else {
-			// second post (preconnect) is cancelled, completed as a zero-byte segment
-			require.Equal(0, int(n))
-		}
-		setSeqCount++
+		require.Equal(len(payload), int(n))
 	}
 
-	<-done
-	require.Equal(2, setSeqCount)
+	// The empty write advanced the sequence; closing releases its next preconnect.
+	sub.SetSeq(-1)
+	td, err := sub.Read()
+	require.Nil(err)
+	require.Equal("2", td.Metadata["Lp-Trickle-Seq"])
+	require.Nil(pub.Close())
+	n, err := io.Copy(io.Discard, td.Reader)
+	require.Nil(err)
+	require.Zero(n)
+	_, err = sub.Read()
+	require.EqualError(err, "stream not found")
 }

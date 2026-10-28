@@ -17,17 +17,20 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/BurntSushi/toml"
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/holiman/uint256"
 	"github.com/j0sh/boa/pkg/boa"
 	"github.com/livepeer/node/eth"
 	"github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/nodeconfig"
+	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
 	"github.com/stretchr/testify/require"
 )
@@ -56,6 +59,7 @@ func TestPaidHTTPStartup(t *testing.T) {
 			mainPort, metricsPort := freeTCPPort(t), freeTCPPort(t)
 			address := fmt.Sprintf("http://127.0.0.1:%d", mainPort)
 			p := paymentKeystoreParams(t, "http://127.0.0.1:1")
+			p.HeartbeatInterval = time.Second
 			p.KeystoreFile, p.KeystorePasswordFile = test.WriteFixedKeystore(t)
 			key, err := eth.OpenKeystoreFile(p.KeystoreFile, p.KeystorePasswordFile)
 			require.NoError(t, err)
@@ -65,27 +69,48 @@ func TestPaidHTTPStartup(t *testing.T) {
 				p.OrchestratorAddress = &recipient
 			}
 			var requests atomic.Int32
+			dependencies := make(chan struct{})
+			releaseDependencies := sync.OnceFunc(func() { close(dependencies) })
 			rpc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				requests.Add(1)
 				var req struct {
 					Method string
 					ID     json.RawMessage
+					Params []json.RawMessage
 				}
 				require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+				if req.Method != "eth_chainId" {
+					select {
+					case <-dependencies:
+					case <-r.Context().Done():
+						return
+					}
+				}
+				requests.Add(1)
 				var result any = "0x1"
 				switch req.Method {
-				case "eth_chainId":
+				case "eth_chainId", "eth_getBalance", "eth_gasPrice", "eth_maxPriorityFeePerGas":
+				case "eth_getTransactionCount":
+					result = "0x0"
+				case "eth_estimateGas":
+					_ = json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "error": map[string]any{"code": -32000, "message": "ticket estimation unavailable"}})
+					return
 				case "eth_getBlockByNumber":
 					result = map[string]string{"number": "0x32", "hash": ethcommon.HexToHash("0xabcd").Hex()}
 				case "eth_call":
 					// Reuse the 32-byte encoding of 1 for calls returning an address, round, hash, or bool.
 					result = fmt.Sprintf("0x%064x", 1)
+					var call struct{ Input string }
+					require.NoError(t, json.Unmarshal(req.Params[0], &call))
+					if strings.HasPrefix(call.Input, fmt.Sprintf("0x%x", crypto.Keccak256([]byte("usedTickets(bytes32)"))[:4])) {
+						result = fmt.Sprintf("0x%064x", 0)
+					}
 				default:
 					t.Errorf("unexpected RPC %s", req.Method)
 				}
 				require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}))
 			}))
 			defer rpc.Close()
+			defer releaseDependencies()
 			p.RPCURL = mustURL(t, rpc.URL)
 			p.Listen = netip.MustParseAddrPort(fmt.Sprintf("0.0.0.0:%d", mainPort))
 			p.MetricsListen = netip.MustParseAddrPort(fmt.Sprintf("127.0.0.1:%d", metricsPort))
@@ -118,7 +143,16 @@ func TestPaidHTTPStartup(t *testing.T) {
 			response, err := http.Get("http://" + p.MetricsListen.String() + "/readyz")
 			require.NoError(t, err)
 			response.Body.Close()
-			require.Equal(t, http.StatusOK, response.StatusCode)
+			require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+			// Seed before releasing either worker's chain observation. The other
+			// wallet case keeps its empty queue, exercising both first-pass paths.
+			if separate {
+				store, err := OpenRedeemerDB(p.RedeemerDB)
+				require.NoError(t, err)
+				defer store.Close()
+				require.NoError(t, store.StoreWinningTicket(&pm.SignedTicket{Ticket: &pm.Ticket{PayerAddress: recipient, Recipient: recipient, FaceValue: big.NewInt(1000), WinProb: big.NewInt(100), TicketNonce: 1, RecipientRandHash: crypto.Keccak256Hash([]byte("failed ticket")), CreationRound: 1, ParamsExpirationBlock: big.NewInt(0)}, Sig: make([]byte, 65), RecipientRand: big.NewInt(1)}))
+			}
+			releaseDependencies()
 			response, err = http.Get(address + "/external/discovery")
 			require.NoError(t, err)
 			defer response.Body.Close()
@@ -142,6 +176,21 @@ func TestPaidHTTPStartup(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, recipient.Bytes(), info.Address)
 			require.Equal(t, recipient.Bytes(), info.TicketParams.Recipient)
+			require.Eventually(t, func() bool {
+				ready, err := http.Get("http://" + p.MetricsListen.String() + "/readyz")
+				if err != nil {
+					return false
+				}
+				defer ready.Body.Close()
+				return ready.StatusCode == http.StatusOK
+			}, 7*time.Second, 20*time.Millisecond, "paid readiness must become healthy after the first dependency and worker observations")
+			response, err = http.Get("http://" + p.MetricsListen.String() + "/metrics")
+			require.NoError(t, err)
+			metrics, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			require.NoError(t, err)
+			require.Equal(t, separate, strings.Contains(string(metrics), "livepeer_redemption_errors_total{"), "readiness must include completion of the first worker pass, including ticket failure")
+
 		})
 	}
 }

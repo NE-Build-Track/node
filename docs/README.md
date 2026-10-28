@@ -13,6 +13,7 @@ Start with [installation](../README.md#install) and the
 | [Signer](signer.md) | Configure price limits, authorization, discovery, and Kafka accounting. |
 | [Chain commands](chain.md) | Inspect accounts, manage stake and funds, and submit transactions. |
 | [Payment recovery](payment-recovery.md) | Back up state, upgrade or roll back, and recover accounting/redemption work. |
+| [Metrics and events](metrics.md) | Scrape app/runner metrics, investigate payments, and configure operational alerts. |
 
 ## Developing and integrating
 

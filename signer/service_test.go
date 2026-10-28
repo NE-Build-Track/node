@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net"
@@ -89,6 +90,23 @@ func postPayment(t *testing.T, s *Service, request map[string]any) *httptest.Res
 	w := httptest.NewRecorder()
 	s.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/generate-live-payment", bytes.NewReader(body)))
 	return w
+}
+
+func TestOversizedPaymentRequestClosesConnection(t *testing.T) {
+	s, _ := testService(t)
+	defer s.Close()
+	countingKey := &failingPaymentSigner{TicketSigner: s.key}
+	s.key = countingKey
+	server := httptest.NewServer(s)
+	defer server.Close()
+	response, err := http.Post(server.URL+"/generate-live-payment", "application/json", strings.NewReader(strings.Repeat("x", (1<<20)+1)))
+	require.NoError(t, err)
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusBadRequest, response.StatusCode, string(body))
+	require.True(t, response.Close, "oversized bodies must retire the HTTP connection")
+	require.Zero(t, countingKey.calls.Load())
 }
 
 func requirePaymentFailure(t *testing.T, w *httptest.ResponseRecorder, status int) {
@@ -258,6 +276,7 @@ func TestSignerRejectsCarriedCreditWithoutTickets(t *testing.T) {
 	request["orchestrator"], request["state"] = wire.EncodeOrchestratorInfo(info), first.State
 	response = postPayment(t, s, request)
 	requirePaymentFailure(t, response, 482)
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": "no_payment_needed"}))
 }
 
 func TestSlowResponseReleasesSlotOnDeadlineOrCancellation(t *testing.T) {
@@ -311,6 +330,7 @@ func TestSignerRefreshResetsNonceAtBatchLimit(t *testing.T) {
 	}
 	require.Equal(t, uint32(500), state.TicketNonce)
 	require.Equal(t, 480, postPayment(t, s, req).Code, "exhausted parameters must request a refresh")
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": "refresh_required"}))
 	info.TicketParams.RecipientRandHash = crypto.Keccak256([]byte("fresh recipient randomness"))
 	req["orchestrator"] = wire.EncodeOrchestratorInfo(info)
 	w := postPayment(t, s, req)
@@ -428,13 +448,19 @@ func TestPaymentFailureStatuses(t *testing.T) {
 					}
 					return funds, err
 				}))
+				outcome := "rejected"
+				if cause == "chain observation" {
+					outcome = "error"
+				}
+				before := test.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": outcome})
 				response := postPayment(t, s, map[string]any{"orchestrator": wire.EncodeOrchestratorInfo(original), "type": "fixed"})
 				requirePaymentFailure(t, response, phase.status)
+				require.Equal(t, before+1, test.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": outcome}))
 				require.NotContains(t, response.Body.String(), "rpc.internal")
 				require.NotContains(t, response.Body.String(), "private-rpc-detail")
 				require.Contains(t, logs.String(), `"phase":"`+phase.name+`"`)
 				if cause == "chain observation" {
-					require.Contains(t, logs.String(), "RPC https://rpc.internal/?token=private-rpc-detail failed")
+					require.NotContains(t, logs.String(), "private-rpc-detail")
 				}
 			})
 		}
@@ -464,7 +490,7 @@ func TestPaymentFailureStatuses(t *testing.T) {
 			require.NotContains(t, response.Body.String(), "/private/keys")
 			require.NotContains(t, response.Body.String(), "private-signing-detail")
 			require.Contains(t, logs.String(), tc.log)
-			require.Contains(t, logs.String(), "key /private/keys/signer.json: private-signing-detail")
+			require.NotContains(t, logs.String(), "private-signing-detail")
 		})
 	}
 	s.key = key
@@ -484,7 +510,27 @@ func TestPaymentFailureStatuses(t *testing.T) {
 			require.NotContains(t, response.Body.String(), "/private/accounting.sqlite")
 			require.NotContains(t, response.Body.String(), "private-storage-detail")
 			require.Contains(t, logs.String(), "payment withheld")
-			require.Contains(t, logs.String(), tc.err.Error())
+			require.NotContains(t, logs.String(), "private-storage-detail")
+			require.Zero(t, test.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": "success"}))
+			require.Zero(t, test.MetricSum(t, s.metrics.Registry, "signer_tickets_total", nil))
 		})
 	}
+}
+
+func TestCancelledPaymentOutcome(t *testing.T) {
+	s, info := testService(t)
+	defer s.Close()
+	s.SetPaymentChain(payerChainFunc(func(ctx context.Context, _, _ ethcommon.Address) (pm.PayerFunds, error) {
+		return pm.PayerFunds{}, ctx.Err()
+	}))
+	body, err := json.Marshal(map[string]any{"orchestrator": wire.EncodeOrchestratorInfo(info), "type": "fixed"})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	request := httptest.NewRequest("POST", "/generate-live-payment", bytes.NewReader(body)).WithContext(ctx)
+	response := httptest.NewRecorder()
+	s.ServeHTTP(response, request)
+	requirePaymentFailure(t, response, 400)
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "signer_payments_total", map[string]string{"outcome": "client_cancelled"}))
+	require.Zero(t, test.MetricSum(t, s.metrics.Registry, "signer_tickets_total", nil))
 }

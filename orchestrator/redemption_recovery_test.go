@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/livepeer/node/eth"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/pm"
 	"github.com/stretchr/testify/require"
@@ -414,6 +416,7 @@ func TestRedemptionReplacementFailuresRemainQueued(t *testing.T) {
 	for _, scenario := range []string{"limit", "ceiling", "rejection", "persistence"} {
 		t.Run(scenario, func(t *testing.T) {
 			f, s, ticket, c, key := newRecoveryTest(t, 6)
+			s.metrics = observability.New("orchestrator")
 			options := RedemptionOptions{Timeout: 30 * time.Millisecond, MaxReplacements: 1}
 			if scenario == "limit" {
 				options.MaxReplacements = 0
@@ -430,6 +433,7 @@ func TestRedemptionReplacementFailuresRemainQueued(t *testing.T) {
 				require.NoError(t, err)
 			}
 			require.NoError(t, StartRedemptionRecovery(t.Context(), s, c, key, options))
+			nextResult := captureRecoveryResults(t, s)
 			tickRecovery(t, s, c, key)
 			require.Eventually(t, func() bool { return ticketPhase(t, s, ticket.Sig) == "retryable" }, time.Second, 5*time.Millisecond)
 			expected := 1
@@ -446,6 +450,16 @@ func TestRedemptionReplacementFailuresRemainQueued(t *testing.T) {
 			var redeemed *string
 			require.NoError(t, s.db.QueryRow("SELECT redeemed_at FROM winning_tickets WHERE sig=?", ticket.Sig).Scan(&redeemed))
 			require.Nil(t, redeemed)
+			result := nextResult()
+			require.Error(t, result.Error())
+			// A rejected replacement commits retryable before the callback moves
+			// the still-submitted predecessor into retryable as well.
+			require.EqualValues(t, expected, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "retryable"}))
+			require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_errors_total", nil))
+			require.NoError(t, s.recovery.recordResult(t.Context(), result))
+			require.EqualValues(t, expected, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "retryable"}), "replaying a completed callback must not emit another transition")
+			require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_errors_total", nil), "replaying a completed callback must not emit another failure")
+			require.Zero(t, test.MetricSum(t, s.metrics.Registry, "redemption_settlements_total", nil))
 		})
 	}
 }
@@ -473,16 +487,21 @@ func TestLostResponseUsesFinalizedTicketGuard(t *testing.T) {
 
 func TestUsedTicketGuardRecoversAfterReorg(t *testing.T) {
 	f, s, ticket, c, key := newRecoveryTest(t, 8)
+	s.metrics = observability.New("orchestrator")
 	f.finalized = false
 	f.used[ticket.Hash()] = true
 	tickRecovery(t, s, c, key)
 	require.Equal(t, "awaiting_finality", ticketPhase(t, s, ticket.Sig))
 	require.Empty(t, f.transactions())
+	tickRecovery(t, s, c, key)
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "awaiting_finality"}))
 	f.mu.Lock()
 	delete(f.used, ticket.Hash())
 	f.mu.Unlock()
 	tickRecovery(t, s, c, key)
 	require.Len(t, f.transactions(), 1)
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "retryable"}))
+	require.Zero(t, test.MetricSum(t, s.metrics.Registry, "redemption_errors_total", nil), "a reorg is not a service failure")
 }
 
 func reopenRecoveryStore(t *testing.T, s *RedeemerDB) *RedeemerDB {
@@ -856,8 +875,11 @@ func TestRevertedReplacementReleasesSameNonceLiability(t *testing.T) {
 
 func TestManualRetryFailureKeepsActiveMonitor(t *testing.T) {
 	f, s, ticket, c, key := newRecoveryTest(t, 101)
+	s.metrics = observability.New("orchestrator")
 	require.NoError(t, StartRedemptionRecovery(t.Context(), s, c, key, RedemptionOptions{Timeout: time.Hour, MaxReplacements: 1}))
 	tickRecovery(t, s, c, key)
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "broadcast"}))
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "submitted"}))
 	first := f.transactions()[0]
 	f.mu.Lock()
 	f.rejectNext = true
@@ -871,11 +893,14 @@ func TestManualRetryFailureKeepsActiveMonitor(t *testing.T) {
 	s.recovery.mu.Unlock()
 	require.Equal(t, 1, roots)
 	require.Len(t, sent, 2, "an identical-byte manual retry must not admit a fresh nonce while the original monitor is active")
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "broadcast"}))
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "submitted"}))
 }
 
 func TestConsumedNonceResolvesOtherTicketHistory(t *testing.T) {
 	f := newRecoveryRPC(t)
 	s, a := f.store(t, 103)
+	s.metrics = observability.New("orchestrator")
 	ca, cb, key := f.chain(t), f.chain(t), recoveryKey(t)
 	b := nextRecoveryTicket(a, 104)
 	b.PayerAddress = common.HexToAddress("0x9999")
@@ -887,6 +912,7 @@ func TestConsumedNonceResolvesOtherTicketHistory(t *testing.T) {
 	f.rejectNext = true
 	f.mu.Unlock()
 	require.Error(t, broadcastRedemption(t.Context(), s, ca.Contracts, a.Sig, a0))
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "retryable"}))
 	b0, err := cb.PrepareRedemption(t.Context(), key, big.NewInt(1), redeemTicket(b))
 	require.NoError(t, err)
 	require.Equal(t, a0.Nonce, b0.Nonce)
@@ -897,12 +923,24 @@ func TestConsumedNonceResolvesOtherTicketHistory(t *testing.T) {
 	require.EqualValues(t, 1, a1.Nonce)
 	require.NoError(t, s.recordPrepared(t.Context(), a, a1))
 	require.NoError(t, broadcastRedemption(t.Context(), s, ca.Contracts, a.Sig, a1))
+	// A durable sibling on the same sender/nonce must become retryable when B
+	// finalizes, even though the sibling itself has no finalized receipt.
+	sibling := nextRecoveryTicket(a, 108)
+	require.NoError(t, s.StoreWinningTicket(sibling))
+	require.NoError(t, s.recordPrepared(t.Context(), sibling, eth.SignedTransaction{Hash: common.HexToHash("0xc"), Raw: []byte{1}, From: b0.From, Nonce: b0.Nonce}))
 	sent := f.transactions()
 	f.mine(sent[1], true)
 	f.mine(sent[2], false)
 	require.NotEmpty(t, ReconcileSubmitted(t.Context(), s, ca))
 	require.Equal(t, "confirmed", ticketPhase(t, s, b.Sig))
 	require.Equal(t, "reverted", ticketPhase(t, s, a.Sig))
+	require.Equal(t, "retryable", ticketPhase(t, s, sibling.Sig))
+	require.EqualValues(t, 2, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "retryable"}))
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_settlements_total", nil))
+	require.NoError(t, s.finishTicket(t.Context(), b.Sig, "confirmed", b0.Hash.Hex()))
+	require.EqualValues(t, 2, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "retryable"}))
+	require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_settlements_total", nil))
+	require.NoError(t, s.setTicketPhase(t.Context(), sibling.Sig, "invalid"))
 	next := nextRecoveryTicket(a, 105)
 	require.NoError(t, s.storeWinningTickets(t.Context(), a.PayerAddress, next.RecipientRandHash, 0, big.NewInt(1000), []*pm.SignedTicket{next}), "B consumed nonce zero and A's nonce one failed; A has no remaining liability")
 }
@@ -1081,6 +1119,62 @@ func TestFinalizedUsePollingRetainsOnlyUnresolvedWork(t *testing.T) {
 				require.NoError(t, s.db.QueryRow("SELECT redeemed_at IS NOT NULL FROM winning_tickets WHERE sig=?", ticket.Sig).Scan(&redeemed))
 				require.True(t, redeemed)
 			}
+		})
+	}
+}
+
+// Configure before sending work so the callback is immutable while jobs run.
+func captureRecoveryResults(t *testing.T, s *RedeemerDB) func() *eth.TransactionReceipt {
+	t.Helper()
+	results := make(chan *eth.TransactionReceipt, 8)
+	completed := s.recovery.manager.Completed
+	s.recovery.manager.Completed = func(ctx context.Context, result *eth.TransactionReceipt) { completed(ctx, result); results <- result }
+	return func() *eth.TransactionReceipt {
+		t.Helper()
+		select {
+		case result := <-results:
+			return result
+		case <-time.After(3 * time.Second):
+			t.Fatal("redemption callback did not complete")
+			return nil
+		}
+	}
+}
+
+func TestRedemptionCallbackObservations(t *testing.T) {
+	for _, failCommit := range []bool{false, true} {
+		t.Run(fmt.Sprintf("commit_failure=%t", failCommit), func(t *testing.T) {
+			f, s, ticket, c, key := newRecoveryTest(t, 112)
+			s.metrics = observability.New("orchestrator")
+			f.finalized = false
+			f.mineAfter = 1
+			if failCommit {
+				_, err := s.db.Exec(`CREATE TRIGGER fail_mined BEFORE UPDATE OF phase ON redemption_attempts WHEN NEW.phase='mined' BEGIN SELECT RAISE(ABORT,'storage failure'); END`)
+				require.NoError(t, err)
+			}
+			require.NoError(t, StartRedemptionRecovery(t.Context(), s, c, key, RedemptionOptions{Timeout: time.Hour, MaxReplacements: 0}))
+			nextResult := captureRecoveryResults(t, s)
+			tickRecovery(t, s, c, key)
+			result := nextResult()
+			require.NoError(t, result.Error())
+			if failCommit {
+				require.NotEqual(t, "mined", ticketPhase(t, s, ticket.Sig))
+				require.Zero(t, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "mined"}))
+				_, err := s.db.Exec(`DROP TRIGGER fail_mined`)
+				require.NoError(t, err)
+				require.NoError(t, s.recovery.recordResult(t.Context(), result))
+			}
+			require.Equal(t, "mined", ticketPhase(t, s, ticket.Sig))
+			require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "mined"}))
+			require.NoError(t, s.recovery.recordResult(t.Context(), result))
+			require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_transitions_total", map[string]string{"event": "mined"}))
+			require.Zero(t, test.MetricSum(t, s.metrics.Registry, "redemption_settlements_total", nil))
+			f.mu.Lock()
+			f.finalized = true
+			f.mu.Unlock()
+			require.Empty(t, ReconcileSubmitted(t.Context(), s, c))
+			require.Empty(t, ReconcileSubmitted(t.Context(), s, c))
+			require.EqualValues(t, 1, test.MetricSum(t, s.metrics.Registry, "redemption_settlements_total", nil))
 		})
 	}
 }

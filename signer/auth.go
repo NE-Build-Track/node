@@ -11,9 +11,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/livepeer/node/destination"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/pm/wire"
 )
 
@@ -54,19 +56,30 @@ func (s *Service) SetAuthWebhook(endpoint *url.URL, headers Headers) error {
 }
 
 func (s *Service) authorizePayment(r *http.Request, req paymentRequest, price wire.PriceInfo, state *paymentState) error {
+	logger := slog.With("component", "signer", "event", "authorization", "operation", "authorization")
 	identity := r.Header.Get("Signer-Auth-Id")
-	if s.authURL != nil && (state.AuthPolicy != s.authPolicy || state.AuthExpiry == 0 || time.Now().Unix() > state.AuthExpiry) {
+	refresh := s.authURL != nil && (state.AuthPolicy != s.authPolicy || state.AuthExpiry == 0 || time.Now().Unix() > state.AuthExpiry)
+	if s.authURL != nil && !refresh {
+		s.metrics.Add("signer_auth_cache_hits_total", 1, nil)
+	}
+	if refresh {
+		started := time.Now()
+		status, outcome := 0, "error"
+		defer func() {
+			s.metrics.Add("signer_auth_webhook_requests_total", 1, observability.Labels{"status": strconv.Itoa(status), "outcome": outcome})
+			s.metrics.Observe("signer_auth_webhook_duration_seconds", time.Since(started).Seconds(), nil)
+		}()
 		body, err := json.Marshal(struct {
 			Headers http.Header   `json:"headers"`
 			State   *paymentState `json:"state"`
 		}{r.Header, state})
 		if err != nil {
-			slog.ErrorContext(r.Context(), "signer auth payload encoding failed", "error", err)
+			logger.ErrorContext(r.Context(), "signer auth payload encoding failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 			return err
 		}
 		request, err := http.NewRequestWithContext(r.Context(), http.MethodPost, s.authURL.String(), bytes.NewReader(body))
 		if err != nil {
-			slog.ErrorContext(r.Context(), "signer auth request construction failed", "error", err)
+			logger.ErrorContext(r.Context(), "signer auth request construction failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 			return err
 		}
 		request.Header.Set("Content-Type", "application/json")
@@ -78,22 +91,23 @@ func (s *Service) authorizePayment(r *http.Request, req paymentRequest, price wi
 		}
 		response, err := s.authClient.Do(request)
 		if err != nil {
-			slog.ErrorContext(r.Context(), "signer auth webhook unavailable", "error", err)
-			return paymentFailure{502, "signer auth webhook unavailable"}
+			logger.ErrorContext(r.Context(), "signer auth webhook unavailable", "outcome", "error", "error_kind", observability.ErrorKind(err))
+			return serviceFailure(502, "signer auth webhook unavailable")
 		}
 		defer response.Body.Close()
+		status = response.StatusCode
 		if response.StatusCode != 200 {
-			slog.ErrorContext(r.Context(), "signer auth webhook returned non-200 HTTP status", "http_status", response.StatusCode)
-			return paymentFailure{502, "signer auth webhook failed"}
+			logger.ErrorContext(r.Context(), "signer auth webhook returned non-200 HTTP status", "outcome", "error", "error_kind", "http_status", "http_status", response.StatusCode)
+			return serviceFailure(502, "signer auth webhook failed")
 		}
 		data, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
 		if err != nil {
-			slog.ErrorContext(r.Context(), "signer auth response read failed", "error", err)
-			return paymentFailure{502, "invalid signer auth response"}
+			logger.ErrorContext(r.Context(), "signer auth response read failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
+			return serviceFailure(502, "invalid signer auth response")
 		}
 		if len(data) > 1<<20 {
-			slog.ErrorContext(r.Context(), "signer auth response exceeds size limit")
-			return paymentFailure{502, "invalid signer auth response"}
+			logger.ErrorContext(r.Context(), "signer auth response exceeds size limit", "outcome", "error", "error_kind", "response_limit")
+			return serviceFailure(502, "invalid signer auth response")
 		}
 		var auth struct {
 			Status   int       `json:"status"`
@@ -103,16 +117,17 @@ func (s *Service) authorizePayment(r *http.Request, req paymentRequest, price wi
 			MaxPrice *maxPrice `json:"maxPrice"`
 		}
 		if err := json.Unmarshal(data, &auth); err != nil {
-			slog.ErrorContext(r.Context(), "signer auth response decoding failed", "error", err)
-			return paymentFailure{502, "invalid signer auth response"}
+			logger.ErrorContext(r.Context(), "signer auth response decoding failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
+			return serviceFailure(502, "invalid signer auth response")
 		}
 		if auth.Status != 200 && (auth.Status < 400 || auth.Status > 599) {
-			slog.ErrorContext(r.Context(), "signer auth response has invalid decision status", "decision_status", auth.Status)
-			return paymentFailure{502, "invalid signer auth response"}
+			logger.ErrorContext(r.Context(), "signer auth response has invalid decision status", "outcome", "error", "error_kind", "invalid_decision", "decision_status", auth.Status)
+			return serviceFailure(502, "invalid signer auth response")
 		}
 		if auth.Status != 200 {
-			slog.WarnContext(r.Context(), "signer authorization rejected", "decision_status", auth.Status)
-			return paymentFailure{auth.Status, fmt.Sprintf("signer auth rejected request with status %d", auth.Status)}
+			outcome = "denied"
+			logger.WarnContext(r.Context(), "signer authorization rejected", "outcome", "denied", "error_kind", "policy_rejected", "decision_status", auth.Status)
+			return errors.Join(paymentFailure{auth.Status, fmt.Sprintf("signer auth rejected request with status %d", auth.Status)}, errAuthorizationDenied)
 		}
 		if auth.AuthID != "" {
 			identity = auth.AuthID
@@ -120,19 +135,22 @@ func (s *Service) authorizePayment(r *http.Request, req paymentRequest, price wi
 		state.AuthExpiry, state.AuthPolicy, state.AuthMaxPrice = auth.Expiry, s.authPolicy, ""
 		if auth.MaxPrice != nil {
 			if err := checkMaxPrice(paymentRequest{Type: req.Type, MaxPrice: auth.MaxPrice}, price); err != nil {
-				slog.WarnContext(r.Context(), "signer auth price ceiling rejected", "error", err)
 				if f, ok := errors.AsType[paymentFailure](err); ok && f.status == http.StatusBadRequest {
-					return paymentFailure{http.StatusBadGateway, "signer auth invalid maxPrice"}
+					logger.ErrorContext(r.Context(), "signer auth invalid maxPrice", "outcome", "error", "error_kind", "invalid_policy")
+					return serviceFailure(http.StatusBadGateway, "signer auth invalid maxPrice")
 				}
-				return err
+				outcome = "denied"
+				logger.WarnContext(r.Context(), "signer auth price ceiling rejected", "outcome", outcome, "error_kind", "price_ceiling")
+				return errors.Join(err, errAuthorizationDenied)
 			}
 			state.AuthMaxPrice = auth.MaxPrice.Price.String()
 		}
+		outcome = "success"
 	}
 	// Apply webhook identity precedence before checking for an established ID change.
 	if identity != "" && state.AuthID != identity {
 		if state.AuthID != "" {
-			slog.WarnContext(r.Context(), "signer authorization identity changed")
+			logger.WarnContext(r.Context(), "signer authorization identity changed", "outcome", "denied", "error_kind", "identity_changed")
 			return paymentFailure{403, "signer auth ID changed"}
 		}
 		state.AuthID = identity

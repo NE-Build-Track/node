@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -70,7 +71,11 @@ func TestServeWithoutRunnerOrPaymentDependencies(t *testing.T) {
 				require.NoError(t, err)
 				require.NoError(t, response.Body.Close())
 				require.Equal(t, 200, response.StatusCode)
-				require.Equal(t, want, string(body))
+				if strings.HasSuffix(path, "/metrics") {
+					require.Contains(t, string(body), want)
+				} else {
+					require.Equal(t, want, string(body))
+				}
 			}
 		})
 	}

@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/livepeer/node/destination"
+	"github.com/livepeer/node/internal/observability"
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,8 +30,30 @@ func TestCollectorCacheLifecycle(t *testing.T) {
 	status, body := 200, envelope(candidate("1999-01-01T00:00:00Z"))
 	c := &Collector[record]{MaxFailures: 6, Client: &http.Client{Transport: collectorTransport(func(*http.Request) (*http.Response, error) { return collectorResponse(status, body), nil })}}
 	c.SetSources([]*url.URL{{Scheme: "https", Host: "source.example"}})
+	m := observability.New("discovery")
+	m.Snapshot(c.CollectMetrics)
+	assertMetrics := func(state string, count, failures int, last time.Time) {
+		t.Helper()
+		require.Len(t, test.MetricSamples(t, m.Registry, "discovery_source_state", nil), 4)
+		for _, candidate := range []string{"uninitialized", "healthy", "retained", "evicted"} {
+			require.Equal(t, observability.Bool(candidate == state), test.MetricSum(t, m.Registry, "discovery_source_state", map[string]string{"state": candidate}))
+		}
+		wantLast := 0.0
+		if !last.IsZero() {
+			wantLast = float64(last.Unix())
+		}
+		require.Equal(t, wantLast, test.MetricSum(t, m.Registry, "discovery_last_success_timestamp_seconds", nil))
+		require.EqualValues(t, count, test.MetricSum(t, m.Registry, "discovery_cached_runners", nil))
+		require.EqualValues(t, failures, test.MetricSum(t, m.Registry, "discovery_source_failures", nil))
+	}
+	assertMetrics("uninitialized", 0, 0, time.Time{})
+	status = 500
+	c.Refresh(t.Context(), false)
+	assertMetrics("uninitialized", 0, 1, time.Time{})
+	status = 200
 	c.Refresh(t.Context(), false)
 	original := c.Snapshots()[0]
+	assertMetrics("healthy", 1, 0, original.LastSuccess)
 	for i, failure := range []struct {
 		status int
 		body   string
@@ -40,22 +64,27 @@ func TestCollectorCacheLifecycle(t *testing.T) {
 		c.Refresh(t.Context(), false)
 		got := c.Snapshots()[0]
 		require.Equal(t, original.Entries, got.Entries)
+		require.Equal(t, original.LastSuccess, got.LastSuccess)
+		assertMetrics("retained", 1, i+1, original.LastSuccess)
 		require.Equal(t, original.QueriedAt, got.QueriedAt)
 		require.Equal(t, i+1, got.Failures)
 	}
 	c.Refresh(t.Context(), false)
 	require.Empty(t, c.Snapshots())
+	assertMetrics("evicted", 0, 6, original.LastSuccess)
 	require.True(t, c.Initialized(), "eviction does not reset startup")
 	status, body = 200, envelope(candidate("1999-02-01T00:00:00Z"))
 	c.Refresh(t.Context(), false)
 	require.Equal(t, "1999-02-01T00:00:00Z", c.Snapshots()[0].Entries[0].Runners[0].Observed)
 	require.Zero(t, c.Snapshots()[0].Failures)
+	assertMetrics("healthy", 1, 0, c.Snapshots()[0].LastSuccess)
 	status = 500
 	c.Refresh(t.Context(), false)
 	status, body = 200, "[]"
 	c.Refresh(t.Context(), false)
 	require.Len(t, c.Snapshots(), 1, "empty success is still a usable source")
 	require.Empty(t, c.Snapshots()[0].Entries)
+	assertMetrics("healthy", 0, 0, c.Snapshots()[0].LastSuccess)
 	require.Zero(t, c.Snapshots()[0].Failures)
 }
 
@@ -136,10 +165,10 @@ func TestCollectorFailureDiagnostics(t *testing.T) {
 		name, endpoint, want string
 		transport            http.RoundTripper
 	}{
-		{"grant", "http://127.0.0.1/private-token", "denied address", policy.Client().Transport},
-		{"DNS", "https://missing.example/private-token", "no such host", policy.Client().Transport},
-		{"timeout", "https://source.example/private-token", "context deadline exceeded", collectorTransport(func(*http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })},
-		{"redirect", "https://source.example/private-token", "invalid discovery redirect URL", collectorTransport(func(*http.Request) (*http.Response, error) {
+		{"grant", "http://127.0.0.1/private-token", "denied_destination", policy.Client().Transport},
+		{"DNS", "https://missing.example/private-token", "dns", policy.Client().Transport},
+		{"timeout", "https://source.example/private-token", "timeout", collectorTransport(func(*http.Request) (*http.Response, error) { return nil, context.DeadlineExceeded })},
+		{"redirect", "https://source.example/private-token", "invalid_redirect", collectorTransport(func(*http.Request) (*http.Response, error) {
 			response := collectorResponse(302, "")
 			response.Header = http.Header{"Location": {"https://redirect.example/private-token/%zz"}}
 			return response, nil

@@ -6,12 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/livepeer/node/eth"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/pm"
 )
 
@@ -71,7 +73,15 @@ func (s *RedeemerDB) recordTransaction(ctx context.Context, sig []byte, prepared
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	event := "prepared"
+	if previous != "" {
+		event = "replacement_prepared"
+	}
+	s.observeTransition(event, prepared.Hash.Hex(), nil)
+	return nil
 }
 func nullString(s string) any {
 	if s == "" {
@@ -155,6 +165,11 @@ func broadcastSavedRedemption(ctx context.Context, store *RedeemerDB, contracts 
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	// An acknowledged replay does not begin a new logical broadcast phase.
+	broadcastChanged := !preserve && previousPhase != "sending" && previousPhase != "broadcast" && previousPhase != "submitted"
+	if broadcastChanged {
+		store.observeTransition("broadcast", identity.Hash.Hex(), nil)
+	}
 	sendErr := contracts.Broadcast(ctx, identity)
 	phase := "submitted"
 	var message any
@@ -178,14 +193,25 @@ func broadcastSavedRedemption(ctx context.Context, store *RedeemerDB, contracts 
 		return errors.Join(sendErr, err)
 	}
 	defer tx.Rollback()
-	_, err = tx.Exec(`UPDATE redemption_transactions SET phase=?,error=?,acknowledged=max(acknowledged,?) WHERE hash=? AND phase=?`, phase, message, ack, identity.Hash.Hex(), claimedPhase)
+	result, err = tx.Exec(`UPDATE redemption_transactions SET phase=?,error=?,acknowledged=max(acknowledged,?) WHERE hash=? AND phase=?`, phase, message, ack, identity.Hash.Hex(), claimedPhase)
+	var summaryResult sql.Result
 	if err == nil {
-		_, err = tx.Exec(`UPDATE redemption_attempts SET phase=?,error=? WHERE sig=? AND phase='broadcast' AND EXISTS(SELECT 1 FROM winning_tickets WHERE sig=? AND tx_hash=?)`, phase, message, sig, sig, identity.Hash.Hex())
+		summaryResult, err = tx.Exec(`UPDATE redemption_attempts SET phase=?,error=? WHERE sig=? AND phase='broadcast' AND EXISTS(SELECT 1 FROM winning_tickets WHERE sig=? AND tx_hash=?)`, phase, message, sig, sig, identity.Hash.Hex())
 	}
 	if err != nil {
 		return errors.Join(sendErr, err)
 	}
-	return errors.Join(sendErr, tx.Commit())
+	commitErr := tx.Commit()
+	if commitErr == nil {
+		store.metrics.Add("redemption_broadcasts_total", 1, observability.Labels{"outcome": observability.ErrorKind(sendErr)})
+		changed, _ := result.RowsAffected()
+		summaryChanged, _ := summaryResult.RowsAffected()
+		if changed+summaryChanged > 0 && !preserve && (broadcastChanged || phase != previousPhase) {
+			// Broadcast errors are observed by the caller; this records the phase.
+			store.observeTransition(phase, identity.Hash.Hex(), nil)
+		}
+	}
+	return errors.Join(sendErr, commitErr)
 }
 
 func signedIdentity(tx *types.Transaction) (eth.SignedTransaction, error) {
@@ -207,6 +233,23 @@ func (s *RedeemerDB) finishTicket(ctx context.Context, sig []byte, phase string,
 		return err
 	}
 	defer tx.Rollback()
+	var retried []string
+	commit := func() error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		for _, hash := range retried {
+			s.observeTransition("retryable", hash, nil)
+		}
+		return nil
+	}
+	var oldPhase, enqueued string
+	var face []byte
+	var redeemed bool
+	var observationErr error
+	if s.metrics != nil {
+		observationErr = tx.QueryRowContext(ctx, `SELECT COALESCE(a.phase,''),COALESCE(w.enqueued_at,''),w.face_value,w.redeemed_at IS NOT NULL FROM winning_tickets w LEFT JOIN redemption_attempts a ON a.sig=w.sig WHERE w.sig=?`, sig).Scan(&oldPhase, &enqueued, &face, &redeemed)
+	}
 	if hash == "" && phase != "used" {
 		var latest sql.NullString
 		if err := tx.QueryRowContext(ctx, "SELECT tx_hash FROM winning_tickets WHERE sig=?", sig).Scan(&latest); err != nil {
@@ -220,7 +263,21 @@ func (s *RedeemerDB) finishTicket(ctx context.Context, sig []byte, phase string,
 		// applying the ticket outcome, which may already be a finalized success.
 		_, err = tx.ExecContext(ctx, `UPDATE redemption_transactions SET phase='superseded',error=NULL WHERE hash!=? AND (redeemer_address,nonce)=(SELECT redeemer_address,nonce FROM redemption_transactions WHERE hash=?) AND phase NOT IN ('confirmed','reverted')`, hash, hash)
 		if err == nil {
-			_, err = tx.ExecContext(ctx, `UPDATE redemption_attempts SET phase='retryable',error=NULL WHERE sig!=? AND phase IN ('prepared','broadcast','submitted','mined') AND EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_transactions t ON t.hash=w.tx_hash WHERE w.sig=redemption_attempts.sig AND t.phase='superseded' AND (t.redeemer_address,t.nonce)=(SELECT redeemer_address,nonce FROM redemption_transactions WHERE hash=?))`, sig, hash)
+			var rows *sql.Rows
+			rows, err = tx.QueryContext(ctx, `UPDATE redemption_attempts SET phase='retryable',error=NULL WHERE sig!=? AND phase IN ('prepared','broadcast','submitted','mined') AND EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_transactions t ON t.hash=w.tx_hash WHERE w.sig=redemption_attempts.sig AND t.phase='superseded' AND (t.redeemer_address,t.nonce)=(SELECT redeemer_address,nonce FROM redemption_transactions WHERE hash=?)) RETURNING (SELECT tx_hash FROM winning_tickets WHERE sig=redemption_attempts.sig)`, sig, hash)
+			if err == nil {
+				for rows.Next() {
+					var sibling sql.NullString
+					if err = rows.Scan(&sibling); err != nil {
+						break
+					}
+					retried = append(retried, sibling.String)
+				}
+				if err == nil {
+					err = rows.Err()
+				}
+				rows.Close()
+			}
 		}
 		var message any
 		if phase == "reverted" {
@@ -241,7 +298,7 @@ func (s *RedeemerDB) finishTicket(ctx context.Context, sig []byte, phase string,
 	if n, err := result.RowsAffected(); err != nil {
 		return err
 	} else if n == 0 {
-		return tx.Commit()
+		return commit()
 	}
 	if phase == "confirmed" || phase == "used" {
 		_, err = tx.ExecContext(ctx, `UPDATE winning_tickets SET redeemed_at=COALESCE(redeemed_at,?),tx_hash=COALESCE(?,tx_hash) WHERE sig=?`, time.Now().UTC().Format(time.RFC3339Nano), nullString(hash), sig)
@@ -256,5 +313,20 @@ func (s *RedeemerDB) finishTicket(ctx context.Context, sig []byte, phase string,
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := commit(); err != nil {
+		return err
+	}
+	if s.metrics != nil && observationErr == nil {
+		if oldPhase != phase {
+			s.observeTransition(phase, hash, nil)
+		}
+		if !redeemed && (phase == "confirmed" || phase == "used") {
+			s.metrics.Add("redemption_settlements_total", 1, nil)
+			s.metrics.Add("redemption_settled_eth_total", observability.ETH(new(big.Rat).SetInt(new(big.Int).SetBytes(face))), nil)
+			if at, err := time.Parse(time.RFC3339Nano, enqueued); err == nil {
+				s.metrics.Observe("redemption_settlement_duration_seconds", max(time.Since(at).Seconds(), 0), nil)
+			}
+		}
+	}
+	return nil
 }

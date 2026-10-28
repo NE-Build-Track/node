@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/livepeer/node/internal/observability"
 )
 
 // local (in-memory) publisher for trickle protocol
@@ -76,7 +78,7 @@ func (c *TrickleLocalPublisher) Write(data io.Reader) error {
 			if err == io.EOF {
 				break
 			}
-			slog.Info("Error reading published data", "channel", c.channelName, "seq", seq, "bytes written", totalRead, "err", err)
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Error reading published data", "channel", c.channelName, "seq", seq, "bytes written", totalRead, "outcome", "error", "error_kind", observability.ErrorKind(err))
 		}
 	}
 	segment.close()

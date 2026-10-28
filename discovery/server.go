@@ -13,6 +13,7 @@ import (
 
 	"github.com/livepeer/node/destination"
 	discovery "github.com/livepeer/node/discovery/shared"
+	"github.com/livepeer/node/internal/observability"
 )
 
 type discoveryNode struct {
@@ -20,6 +21,7 @@ type discoveryNode struct {
 	QueriedAt time.Time `json:"queried_at"`
 }
 type Server struct {
+	metrics                          *observability.Metrics
 	logger                           *slog.Logger
 	mux                              *http.ServeMux
 	urls                             []*url.URL
@@ -71,10 +73,11 @@ func NewServer(p Params, logger *slog.Logger) (*Server, error) {
 	client := policy.Client()
 	client.Timeout = 3 * time.Second
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	s := &Server{logger: logger, mux: http.NewServeMux(),
+	metrics := observability.New("discovery")
+	s := &Server{metrics: metrics, logger: logger.With("component", "discovery"), mux: http.NewServeMux(),
 		urls: urls, interval: p.RefreshInterval,
 		advertiseNodes: p.AdvertiseNodes, advertiseRunners: p.AdvertiseRunners,
-		collector: &discovery.Collector[discoveryRunner]{Client: client, MaxFailures: max(1, p.MaxFailedRefreshes), Logger: logger}}
+		collector: &discovery.Collector[discoveryRunner]{Client: client, MaxFailures: max(1, p.MaxFailedRefreshes), Logger: logger.With("component", "discovery"), Observe: metrics.Discovery}}
 	endpoints := make([]*url.URL, 0, len(urls))
 	for _, base := range urls {
 		endpoint := base.Clone()
@@ -86,10 +89,18 @@ func NewServer(p Params, logger *slog.Logger) (*Server, error) {
 	}
 	s.collector.SetSources(endpoints)
 	s.mux.HandleFunc("GET /discovery", s.discovery)
+	metrics.Snapshot(s.collector.CollectMetrics)
+	metrics.Legacy(func(emit observability.Emit) { emit("discovery_up", 1, nil) })
 	return s, nil
 }
 
-func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.metrics.HTTP(w, r, func(w http.ResponseWriter, r *http.Request) {
+		_, pattern := s.mux.Handler(r)
+		observability.Operation(r, pattern)
+		s.mux.ServeHTTP(w, r)
+	})
+}
 
 func (s *Server) Close() { s.collector.Close() }
 

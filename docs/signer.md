@@ -203,22 +203,10 @@ curl -fsS http://127.0.0.1:8938/healthz
 curl -fsS http://127.0.0.1:8938/metrics
 ```
 
-`/healthz` checks liveness. `/readyz` requires chain access, positive deposit and
-total reserve, no withdrawal scheduled at or before the next round, a fresh
-exchange rate, and healthy enabled outbox storage with capacity. Kafka
-connectivity alone does not affect readiness. Recipient-specific claimable
-reserve is checked during payment generation.
+See [metrics and operational events](metrics.md) for readiness requirements,
+metric definitions, and query/alert examples.
 
-Monitor backlog, errors, and filesystem space. `/metrics` exposes:
-
-- `livepeer_signer_up`
-- `livepeer_signer_kafka_pending_events`
-- `livepeer_signer_kafka_pending_bytes`
-- `livepeer_signer_kafka_oldest_event_age_seconds`
-- `livepeer_signer_kafka_outbox_healthy`
-- `livepeer_signer_kafka_publish_errors_total`
-- `livepeer_signer_kafka_enqueue_errors_total`
-- `livepeer_signer_kafka_storage_errors_total`
+Monitor backlog, errors, and filesystem space.
 
 Replicas with the same key and authorization configuration can continue
 client-held signed state. Keep a separate durable outbox for each replica.

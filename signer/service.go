@@ -17,9 +17,11 @@ import (
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/felixge/httpsnoop"
 	"github.com/livepeer/node/destination"
 	discovery "github.com/livepeer/node/discovery/shared"
 	"github.com/livepeer/node/eth"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
 )
@@ -45,6 +47,7 @@ type paymentResponse struct {
 }
 
 type Service struct {
+	metrics           *observability.Metrics
 	authClient        *http.Client
 	authURL           *url.URL
 	authPolicy        string
@@ -92,7 +95,7 @@ func (s *Service) SetDiscovery(orchestrators []*url.URL, grants ...string) error
 	client := policy.Client()
 	client.Timeout = 5 * time.Second
 	s.collector.Close()
-	s.collector = &discovery.Collector[discoveredRunner]{Client: client, MaxFailures: s.collector.MaxFailures}
+	s.collector = &discovery.Collector[discoveredRunner]{Client: client, MaxFailures: s.collector.MaxFailures, Observe: s.metrics.Discovery}
 	if s.orchWebhook == nil {
 		s.collector.SetSources(urls)
 	} else if cached := s.orchWebhook.urls.Load(); cached != nil {
@@ -142,6 +145,7 @@ func (s *Service) Close() error {
 
 func newService(key *eth.Key) *Service {
 	s := &Service{
+		metrics:           observability.New("signer"),
 		key:               key,
 		mux:               http.NewServeMux(),
 		payerPolicy:       pm.DefaultPayerPolicy(),
@@ -152,9 +156,17 @@ func newService(key *eth.Key) *Service {
 	s.mux.HandleFunc("POST /sign-orchestrator-info", s.signInfo)
 	s.mux.HandleFunc("POST /generate-live-payment", s.generate)
 	s.mux.HandleFunc("GET /discover-orchestrators", s.discover)
+	s.metrics.Snapshot(s.collectMetrics)
+	s.metrics.Legacy(func(emit observability.Emit) { emit("signer_up", 1, nil) })
 	return s
 }
 func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.metrics.HTTP(w, r, s.serveHTTP)
+}
+
+func (s *Service) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	_, pattern := s.mux.Handler(r)
+	observability.Operation(r, pattern)
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
 	control := http.NewResponseController(w)
@@ -175,6 +187,7 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case s.slots <- struct{}{}:
 		defer func() { <-s.slots }()
 	default:
+		s.metrics.Add("http_admission_rejections_total", 1, observability.Labels{"pool": "control"})
 		signerError(w, http.StatusServiceUnavailable, "signer busy")
 		return
 	}
@@ -193,9 +206,9 @@ func signerError(w http.ResponseWriter, status int, reason string) {
 
 func (s *Service) signInfo(w http.ResponseWriter, r *http.Request) {
 	address := s.key.Address().Hex()
-	sig, err := s.key.SignMessage([]byte(address))
+	sig, err := s.signMessage("orchestrator_info", []byte(address))
 	if err != nil {
-		slog.ErrorContext(r.Context(), "signer orchestrator info signing failed", "error", err)
+		slog.With("component", "signer", "event", "sign_payment", "operation", "sign_payment").ErrorContext(r.Context(), "signer orchestrator info signing failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		signerError(w, 500, "signing failed")
 		return
 	}
@@ -302,6 +315,15 @@ type paymentFailure struct {
 func (e paymentFailure) Error() string { return e.reason }
 func invalid(reason string) error      { return paymentFailure{http.StatusBadRequest, reason} }
 
+var (
+	errPaymentService      = errors.New("payment dependency unavailable")
+	errAuthorizationDenied = errors.New("payment authorization denied")
+)
+
+func serviceFailure(status int, reason string) error {
+	return errors.Join(paymentFailure{status, reason}, errPaymentService)
+}
+
 func checkMaxPrice(req paymentRequest, price wire.PriceInfo) error {
 	if req.MaxPrice == nil {
 		return nil
@@ -322,7 +344,17 @@ func checkMaxPrice(req paymentRequest, price wire.PriceInfo) error {
 }
 
 func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+	paymentType, outcome := "unknown", "rejected"
+	defer func() {
+		if outcome != "success" && errors.Is(r.Context().Err(), context.Canceled) {
+			outcome = "client_cancelled"
+		} else if outcome != "success" && errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+			outcome = "error"
+		}
+		s.metrics.Add("signer_payments_total", 1, observability.Labels{"type": paymentType, "outcome": outcome})
+	}()
+	// MaxBytesReader needs net/http's original writer to close oversized requests.
+	body, err := io.ReadAll(http.MaxBytesReader(httpsnoop.Unwrap(w), r.Body, 1<<20))
 	if err != nil {
 		signerError(w, 400, "payment request too large")
 		return
@@ -336,6 +368,7 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		signerError(w, 400, "payment type must be live or fixed")
 		return
 	}
+	paymentType = req.Type
 	info, err := wire.DecodeOrchestratorInfo(req.Orchestrator)
 	if err != nil {
 		signerError(w, 400, "invalid orchestrator Protobuf")
@@ -350,6 +383,7 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 	authTokenExpireBuffer := 0.1
 	refreshPoint := info.Auth.Expiration - int64(authTokenValidPeriod.Seconds()*authTokenExpireBuffer)
 	if time.Now().After(time.Unix(refreshPoint, 0)) {
+		outcome = "refresh_required"
 		w.Header().Set("Livepeer-Orchestrator-URL", info.Transcoder)
 		signerError(w, 480, "refresh expired orchestrator authentication")
 		return
@@ -374,7 +408,8 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		var err error
 		accountingRate, err = s.pricePolicy.checkWithRate(req.Type, info.Price)
 		if err != nil {
-			f := err.(paymentFailure)
+			outcome = paymentOutcome(err)
+			f, _ := errors.AsType[paymentFailure](err)
 			signerError(w, f.status, f.reason)
 			return
 		}
@@ -404,6 +439,7 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 	}
 	draft, err := s.preparePayment(r.Context(), req.Type, req.ManifestID, info, state, oldSequence, time.Now())
 	if err != nil {
+		outcome = paymentOutcome(err)
 		switch {
 		case errors.Is(err, pm.ErrRefreshRequired):
 			w.Header().Set("Livepeer-Orchestrator-URL", info.Transcoder)
@@ -425,6 +461,7 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		draft.State.FeeUSD = new(strings.TrimSuffix(strings.TrimRight(value, "0"), "."))
 	}
 	if err := s.authorizePayment(r, req, info.Price, &draft.State); err != nil {
+		outcome = paymentOutcome(err)
 		if f, ok := errors.AsType[paymentFailure](err); ok {
 			signerError(w, f.status, f.reason)
 		} else {
@@ -432,26 +469,27 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	signed, err := draft.Sign(r.Context(), s.key)
+	outcome = "error"
+	signed, err := draft.Sign(r.Context(), s.key, s.metrics)
 	if err != nil {
 		signerError(w, 500, "payment generation failed")
 		return
 	}
 	stateBytes, err := json.Marshal(draft.State)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "signer payment state encoding failed", "error", err)
+		slog.With("component", "signer", "event", "sign_payment", "operation", "sign_payment").ErrorContext(r.Context(), "signer payment state encoding failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		signerError(w, 500, "payment state encoding failed")
 		return
 	}
-	stateSig, err := s.key.SignMessage(stateBytes)
+	stateSig, err := s.signMessage("state", stateBytes)
 	if err != nil {
-		slog.ErrorContext(r.Context(), "signer payment state signing failed", "error", err)
+		slog.With("component", "signer", "event", "sign_payment", "operation", "sign_payment").ErrorContext(r.Context(), "signer payment state signing failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		signerError(w, 500, "payment state signing failed")
 		return
 	}
 	response, err := json.Marshal(paymentResponse{Payment: signed.Payment, SegCreds: signed.SegCreds, State: signedState{State: stateBytes, Sig: stateSig}})
 	if err != nil {
-		slog.ErrorContext(r.Context(), "signer payment response encoding failed", "error", err)
+		slog.With("component", "signer", "event", "sign_payment", "operation", "sign_payment").ErrorContext(r.Context(), "signer payment response encoding failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		signerError(w, 500, "payment response encoding failed")
 		return
 	}
@@ -459,10 +497,11 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 		event := newSignedTicketEvent(s.key.Address(), req, info, draft)
 		if err := s.events.Enqueue(r.Context(), event); err != nil {
 			if errors.Is(err, errEventTooLarge) {
-				slog.WarnContext(r.Context(), "signer accounting event exceeds size limit; payment withheld", "error", err)
+				outcome = "rejected"
+				slog.With("component", "signer", "event", "sign_payment", "operation", "sign_payment").WarnContext(r.Context(), "signer accounting event exceeds size limit; payment withheld", "outcome", "error", "error_kind", observability.ErrorKind(err))
 				signerError(w, http.StatusRequestEntityTooLarge, "signing event exceeds size limit")
 			} else {
-				slog.ErrorContext(r.Context(), "signer accounting event could not be persisted; payment withheld", "outbox_full", errors.Is(err, errOutboxFull), "error", err)
+				slog.With("component", "signer", "event", "sign_payment", "operation", "sign_payment").ErrorContext(r.Context(), "signer accounting event could not be persisted; payment withheld", "outbox_full", errors.Is(err, errOutboxFull), "outcome", "error", "error_kind", observability.ErrorKind(err))
 				signerError(w, http.StatusServiceUnavailable, "signer accounting outbox unavailable or full")
 			}
 			return
@@ -470,4 +509,6 @@ func (s *Service) generate(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write(response)
+	outcome = "success"
+	s.metrics.Add("signer_tickets_total", float64(draft.Usage.NumTickets), observability.Labels{"type": req.Type})
 }

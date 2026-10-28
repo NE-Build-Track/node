@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -172,6 +171,7 @@ func serve(parent context.Context, p Params) error {
 		return fmt.Errorf("configure signer RPC (LIVEPEER_SIGNER_RPC_URL or --rpc-url-file): %w", err)
 	}
 	defer rpc.Close()
+	rpc.SetObserver(service.metrics.RPC)
 	var chainID *big.Int
 	if p.ChainID != nil {
 		chainID = new(big.Int).SetUint64(*p.ChainID)
@@ -185,13 +185,11 @@ func serve(parent context.Context, p Params) error {
 	}
 	service.SetPaymentChain(pm.EthereumChain{Client: eth.PaymentChain{Contracts: contracts}})
 	policy, _ := newPricePolicy(p.MaxHourlyPrice, p.MaxFixedPrice)
+	policy.metrics = service.metrics
 	if p.WeiPerUSD == nil {
-		rate, until, err := contracts.WeiPerUSD(ctx, p.ETHUSDFeed, p.ETHUSDMaxAge)
-		if err != nil {
-			slog.Error("signer price feed unavailable at startup; check --eth-usd-feed, --eth-usd-max-age and LIVEPEER_SIGNER_RPC_URL or --rpc-url-file", "error", err)
-		} else if err := policy.setRate(rate, until); err != nil {
-			slog.Error("signer price feed invalid at startup; check --eth-usd-feed and --eth-usd-max-age", "error", err)
-		}
+		_ = policy.refreshFeed(ctx, func(ctx context.Context) (*big.Rat, time.Time, error) {
+			return contracts.WeiPerUSD(ctx, p.ETHUSDFeed, p.ETHUSDMaxAge)
+		})
 	} else if err := policy.setRate(p.WeiPerUSD, time.Time{}); err != nil {
 		return err
 	}
@@ -218,6 +216,7 @@ func serve(parent context.Context, p Params) error {
 	}
 	defer func() { _ = producer.Close() }()
 	if producer != nil {
+		service.metrics.Legacy(producer.collectMetrics)
 		service.events = producer
 	}
 	listener, err := net.Listen("tcp", p.Listen.String())
@@ -239,6 +238,9 @@ func serve(parent context.Context, p Params) error {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
 		funds, err := service.paymentChain.PayerFunds(ctx, key.Address(), ethcommon.Address{})
+		if err == nil {
+			service.observeFunds(funds, true)
+		}
 		if err != nil || pm.ValidatePayerFunds(funds) != nil || !service.pricePolicy.ready() || !producer.ready(ctx) {
 			http.Error(w, "signer payment dependencies unavailable", http.StatusServiceUnavailable)
 			return
@@ -246,11 +248,7 @@ func serve(parent context.Context, p Params) error {
 		w.WriteHeader(http.StatusOK)
 		_, _ = io.WriteString(w, "ready\n")
 	})
-	metricsMux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = io.WriteString(w, "livepeer_signer_up 1\n")
-		producer.metrics(r.Context(), w)
-	})
+	metricsMux.Handle("GET /metrics", service.metrics.Handler())
 	srv := &http.Server{BaseContext: func(net.Listener) context.Context { return ctx }, Handler: service, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, MaxHeaderValueCount: 128}
 	metricsServer := &http.Server{BaseContext: srv.BaseContext, Handler: metricsMux, ReadHeaderTimeout: 5 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, MaxHeaderValueCount: 128}
 	errCh := make(chan error, 2)

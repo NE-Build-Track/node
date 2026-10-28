@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"strconv"
 	"sync"
+
+	"github.com/livepeer/node/internal/observability"
 )
 
 // local (in-memory) subscriber for trickle protocol
@@ -59,11 +61,11 @@ func (c *TrickleLocalSubscriber) Read() (*TrickleData, error) {
 			data, eof := subscriber.readData()
 			n, err := w.Write(data)
 			if err != nil {
-				slog.Info("Error writing", "channel", c.channelName, "seq", segment.idx, "err", err)
+				slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Error writing", "channel", c.channelName, "seq", segment.idx, "outcome", "error", "error_kind", observability.ErrorKind(err))
 				return
 			}
 			if n != len(data) {
-				slog.Info("Did not write enough data to local subscriber", "channel", c.channelName, "seq", segment.idx)
+				slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Did not write enough data to local subscriber", "channel", c.channelName, "seq", segment.idx)
 				return
 			}
 			if eof {

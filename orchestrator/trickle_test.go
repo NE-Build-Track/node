@@ -11,6 +11,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -55,7 +56,7 @@ func TestTrickleActiveStreamAndCancellation(t *testing.T) {
 				require.NoError(t, reg.AddStatic(StaticRunner{ID: "r", RunnerURL: "http://127.0.0.1:1", App: "test"}))
 				sid, _, _, _, err := reg.Reserve("r")
 				require.NoError(t, err)
-				s.newChannel("test", "events", "application/octet-stream", "r", sid)
+				s.newChannel("test", "events", "application/octet-stream", "r", sid).identity = reg.identity("r", sid)
 				input, writer := io.Pipe()
 				defer writer.Close()
 				pubDone, subDone := make(chan struct{}), make(chan struct{})
@@ -104,9 +105,60 @@ func TestTrickleActiveStreamAndCancellation(t *testing.T) {
 				default:
 					t.Error("subscriber was not interrupted")
 				}
+				require.GreaterOrEqual(t, test.MetricSum(t, reg.metrics.Registry, "stream_transfer_bytes_total", map[string]string{"app": "test", "runner_id": "r", "protocol": "trickle", "direction": "out"}), float64(len("firststill streaming")))
+				require.Zero(t, test.MetricSum(t, reg.metrics.Registry, "http_requests_in_flight", nil))
 			})
 		})
 	}
+}
+
+func TestTrickleOwnershipSurvivesHeartbeatChanges(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "proxy reply") }))
+	defer upstream.Close()
+	reg, s := reviewServer(t, upstream.URL)
+	defer s.Close()
+	request := httptest.NewRequest("POST", "/runners/heartbeat", strings.NewReader(`{"runner_id":"r","runner_url":"http://127.0.0.1:1","app":"original","capacity":1}`))
+	request.Header.Set("Authorization", "bootstrap")
+	response := httptest.NewRecorder()
+	s.ServeHTTP(response, request)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	var registered heartbeatResponse
+	require.NoError(t, json.Unmarshal(response.Body.Bytes(), &registered))
+	require.NotNil(t, registered.O2R)
+	require.Len(t, test.MetricSamples(t, reg.metrics.Registry, "runner_sessions", map[string]string{"runner_id": "r", "state": "active"}), 1)
+	require.Zero(t, test.MetricSum(t, reg.metrics.Registry, "runner_sessions", map[string]string{"runner_id": "r"}))
+	s.mu.Lock()
+	s.publishSessionEvent(registered.O2R.ChannelName, []byte("ownership"))
+	s.mu.Unlock()
+	_, _, err := reg.Heartbeat(heartbeatRequest{RunnerID: "r", RunnerURL: "http://127.0.0.1:1", App: "updated", Capacity: 1}, registered.HeartbeatSecret)
+	require.NoError(t, err)
+	response = httptest.NewRecorder()
+	s.ServeHTTP(response, httptest.NewRequest("GET", registered.O2R.URL+"/0", nil))
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.Equal(t, "ownership", response.Body.String())
+	require.EqualValues(t, len("ownership"), test.MetricSum(t, reg.metrics.Registry, "stream_transfer_bytes_total", map[string]string{"app": "original", "direction": "out"}))
+	require.Zero(t, test.MetricSum(t, reg.metrics.Registry, "stream_transfer_bytes_total", map[string]string{"app": "updated"}))
+	reg.proxyTemplate = "https://{proxy}.apps.example"
+	require.NoError(t, reg.AddStatic(StaticRunner{ID: "proxy", App: "generated", Mode: "single-shot", RunnerURL: upstream.URL, Capacity: 1, Proxy: true}))
+	response = httptest.NewRecorder()
+	s.ServeHTTP(response, httptest.NewRequest("GET", "https://proxy.apps.example/ai/trickle/"+registered.O2R.ChannelName+"/0", nil))
+	require.Equal(t, 200, response.Code, response.Body.String())
+	require.Equal(t, "proxy reply", response.Body.String())
+	require.EqualValues(t, 1, test.MetricSum(t, reg.metrics.Registry, "app_calls_total", map[string]string{"app": "generated", "protocol": "http"}))
+	for _, app := range []string{"generated", "original"} {
+		require.Zero(t, test.MetricSum(t, reg.metrics.Registry, "app_calls_in_flight", map[string]string{"app": app}))
+	}
+	_, err = reg.Unregister("r", registered.HeartbeatSecret)
+	for _, name := range []string{"runner_registered", "runner_sessions", "runner_capacity_available"} {
+		require.Empty(t, test.MetricSamples(t, reg.metrics.Registry, name, map[string]string{"runner_id": "r"}))
+	}
+	require.NoError(t, err)
+	before := test.MetricSum(t, reg.metrics.Registry, "stream_transfer_bytes_total", nil)
+	response = httptest.NewRecorder()
+	s.ServeHTTP(response, httptest.NewRequest("GET", registered.O2R.URL+"/0", nil))
+	require.Equal(t, http.StatusNotFound, response.Code)
+	require.Equal(t, before, test.MetricSum(t, reg.metrics.Registry, "stream_transfer_bytes_total", nil), "removed ownership must not create empty-label transfer measurements")
+
 }
 
 func TestNamedChannelsAreIdempotentAndReleased(t *testing.T) {

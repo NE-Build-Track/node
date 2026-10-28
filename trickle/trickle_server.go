@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/livepeer/node/internal/observability"
 )
 
 const CHANGEFEED = "_changes"
@@ -60,6 +62,23 @@ type Server struct {
 
 	// for internal channels
 	internalPub *TrickleLocalPublisher
+}
+
+// BufferedBytes reports published bytes retained by live channel segments.
+func (sm *Server) BufferedBytes() int64 {
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+	var size int64
+	for _, stream := range sm.streams {
+		stream.mutex.RLock()
+		for _, segment := range stream.segments {
+			if segment != nil {
+				size += segment.buffer.published.Load()
+			}
+		}
+		stream.mutex.RUnlock()
+	}
+	return size
 }
 
 type Stream struct {
@@ -211,7 +230,7 @@ func (sm *Server) getOrCreateStream(streamName, mimeType string, forceCreate boo
 			maxSegmentBytes: sm.config.MaxSegmentBytes,
 		}
 		sm.streams[streamName] = stream
-		slog.Info("Creating stream", "stream", streamName)
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Info("Creating stream", "stream", streamName)
 	}
 	sm.mutex.Unlock()
 
@@ -257,9 +276,9 @@ func (sm *Server) sweepIdleChannels() {
 		s.mutex.Unlock()
 		if now.Sub(writeTime) > sm.config.IdleTimeout {
 			if err := sm.closeStream(s.name); err != nil {
-				slog.Warn("Could not close idle channel", "channel", s.name, "err", err)
+				slog.With("component", "trickle", "event", "stream", "operation", "stream").Warn("Could not close idle channel", "channel", s.name, "outcome", "error", "error_kind", observability.ErrorKind(err))
 			} else {
-				slog.Info("Closed idle channel", "channel", s.name)
+				slog.With("component", "trickle", "event", "stream", "operation", "stream").Info("Closed idle channel", "channel", s.name)
 			}
 		}
 	}
@@ -287,7 +306,7 @@ func (sm *Server) closeStream(streamName string) error {
 	sm.mutex.Lock()
 	delete(sm.streams, streamName)
 	sm.mutex.Unlock()
-	slog.Info("Deleted stream", "streamName", streamName)
+	slog.With("component", "trickle", "event", "stream", "operation", "stream").Info("Deleted stream", "streamName", streamName)
 
 	// update changefeed if needed
 	if !sm.config.Changefeed {
@@ -328,7 +347,7 @@ func (sm *Server) closeSeq(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid idx", http.StatusBadRequest)
 		return
 	}
-	slog.Info("DELETE closing seq", "channel", s.name, "seq", idx)
+	slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("DELETE closing seq", "channel", s.name, "seq", idx)
 	s.mutex.RLock()
 	seg := s.segments[idx%maxSegmentsPerStream]
 	s.mutex.RUnlock()
@@ -526,7 +545,7 @@ func (s *Stream) handlePost(w http.ResponseWriter, r *http.Request, idx int) {
 		if err != nil {
 			if err == FirstByteTimeout {
 				// Keepalive via provisional headers
-				slog.Info("Sending provisional headers for", "stream", s.name, "idx", idx)
+				slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Sending provisional headers for", "stream", s.name, "idx", idx)
 				w.WriteHeader(http.StatusContinue)
 				continue
 			} else if err == io.EOF {
@@ -552,7 +571,7 @@ func (s *Stream) handlePost(w http.ResponseWriter, r *http.Request, idx int) {
 				}
 				break
 			}
-			slog.Info("Error reading POST body", "stream", s.name, "idx", idx, "bytes written", totalRead, "err", err)
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Error reading POST body", "stream", s.name, "idx", idx, "bytes written", totalRead, "outcome", "error", "error_kind", observability.ErrorKind(err))
 			http.Error(w, "Server error", http.StatusInternalServerError)
 			return
 		}
@@ -562,7 +581,7 @@ func (s *Stream) handlePost(w http.ResponseWriter, r *http.Request, idx int) {
 	w.Header().Set("Lp-Trickle-Seq", strconv.Itoa(segment.idx))
 	stopInterrupt()
 	segment.close()
-	slog.Info("POST completed", "stream", s.name, "idx", idx, "bytes", totalRead, "took", time.Since(startedAt))
+	slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("POST completed", "stream", s.name, "idx", idx, "bytes", totalRead, "took", time.Since(startedAt))
 }
 
 func (s *Stream) getForWrite(idx int) (*Segment, bool) {
@@ -571,7 +590,7 @@ func (s *Stream) getForWrite(idx int) (*Segment, bool) {
 	if idx == -1 {
 		idx = s.nextWrite
 	}
-	slog.Info("POST segment", "stream", s.name, "idx", idx, "next", s.nextWrite)
+	slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("POST segment", "stream", s.name, "idx", idx, "next", s.nextWrite)
 	segmentPos := idx % maxSegmentsPerStream
 	if segment := s.segments[segmentPos]; segment != nil {
 		if idx == segment.idx {
@@ -609,9 +628,9 @@ func (s *Stream) getForRead(idx int) (*Segment, int, bool, bool) {
 		// read request is just a little bit ahead of write head
 		segment = newSegment(idx, s.maxSegmentBytes)
 		s.segments[segmentPos] = segment
-		slog.Info("GET precreating", "stream", s.name, "idx", idx, "next", s.nextWrite)
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("GET precreating", "stream", s.name, "idx", idx, "next", s.nextWrite)
 	}
-	slog.Info("GET segment", "stream", s.name, "idx", idx, "next", s.nextWrite, "exists?", exists(segment, idx))
+	slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("GET segment", "stream", s.name, "idx", idx, "next", s.nextWrite, "exists?", exists(segment, idx))
 	return segment, s.nextWrite, exists(segment, idx), s.closed
 }
 
@@ -721,7 +740,7 @@ func (s *Stream) handleGet(w http.ResponseWriter, r *http.Request, idx int) {
 
 	if n, err := sendData(); err != nil {
 		// Handle write error or client disconnect
-		slog.Error("Error sending data to client", "stream", s.name, "idx", segment.idx, "sentBytes", n, "err", err)
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("Error sending data to client", "stream", s.name, "idx", segment.idx, "sentBytes", n, "outcome", "error", "error_kind", observability.ErrorKind(err))
 		return
 	}
 }
@@ -756,7 +775,7 @@ func (segment *Segment) writeData(data []byte) error {
 func (s *Segment) readData(readPos int) ([]byte, int, bool) {
 	data, nextPos, atTail, invalid, _ := s.buffer.readChunk(readPos)
 	if invalid {
-		slog.Info("Invalid start pos, invoking eof")
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Invalid start pos, invoking eof")
 		return nil, readPos, true
 	}
 	if len(data) > 0 {
@@ -777,7 +796,7 @@ func (s *Segment) readData(readPos int) ([]byte, int, bool) {
 			return data, nextPos, s.closed && atTail && nextPos == published
 		}
 		if invalid {
-			slog.Info("Invalid start pos, invoking eof")
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Invalid start pos, invoking eof")
 			// This might happen if the buffer was reset
 			// eg because of a repeated POST
 			return nil, readPos, true

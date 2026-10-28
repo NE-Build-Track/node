@@ -3,6 +3,7 @@ package eth
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,7 +28,12 @@ const maxRPCResponse = 1 << 20
 type RPC struct {
 	ethereum *ethclient.Client
 	http     *http.Client
+	observer func(string, time.Duration, error)
 }
+
+// SetObserver installs a hook before the client is used. Observations contain
+// allowlisted methods and redacted errors, never RPC payloads or URLs.
+func (r *RPC) SetObserver(observer func(string, time.Duration, error)) { r.observer = observer }
 
 func OpenRPC(endpoint string) (*RPC, error) {
 	u, err := destination.ParseURL(endpoint)
@@ -46,14 +52,16 @@ func NewRPC(endpoint *url.URL, transport http.RoundTripper) (*RPC, error) {
 	if transport == nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	client := &http.Client{Transport: boundedRPCTransport{transport}, Timeout: 15 * time.Second}
+	r := new(RPC)
+	client := &http.Client{Transport: boundedRPCTransport{transport, r}, Timeout: 15 * time.Second}
 	// Redirects can replay eth_sendRawTransaction POST bodies.
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	rpc, err := gethrpc.DialOptions(context.Background(), endpoint.String(), gethrpc.WithHTTPClient(client))
 	if err != nil {
 		return nil, errors.New("invalid Ethereum RPC endpoint")
 	}
-	return &RPC{ethereum: ethclient.NewClient(rpc), http: client}, nil
+	r.ethereum, r.http = ethclient.NewClient(rpc), client
+	return r, nil
 }
 
 func (r *RPC) Close() {
@@ -64,10 +72,38 @@ func (r *RPC) Close() {
 var errRPCResponseLimit = errors.New("ethereum RPC response exceeds 1 MiB")
 
 // Bound the HTTP body before geth decodes it or includes it in an HTTP error.
-type boundedRPCTransport struct{ http.RoundTripper }
+type boundedRPCTransport struct {
+	http.RoundTripper
+	rpc *RPC
+}
 
-func (t boundedRPCTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	response, err := t.RoundTripper.RoundTrip(request)
+func (t boundedRPCTransport) RoundTrip(request *http.Request) (response *http.Response, err error) {
+	observer := t.rpc.observer
+	var observed error
+	if observer != nil {
+		start, method := time.Now(), "unknown"
+		if request.GetBody != nil {
+			if body, err := request.GetBody(); err == nil {
+				var envelope struct {
+					Method string `json:"method"`
+				}
+				if json.NewDecoder(body).Decode(&envelope) == nil {
+					switch envelope.Method {
+					case "eth_chainId", "eth_call", "eth_getCode", "eth_blockNumber", "eth_getBalance", "eth_getTransactionCount", "eth_getTransactionReceipt", "eth_getTransactionByHash", "eth_getBlockByNumber", "eth_estimateGas", "eth_sendRawTransaction", "eth_maxPriorityFeePerGas", "eth_gasPrice":
+						method = envelope.Method
+					}
+				}
+				_ = body.Close()
+			}
+		}
+		defer func() {
+			if err != nil {
+				observed = err
+			}
+			observer(method, time.Since(start), safeRPCError(observed))
+		}()
+	}
+	response, err = t.RoundTripper.RoundTrip(request)
 	if err != nil {
 		return nil, err
 	}
@@ -78,6 +114,16 @@ func (t boundedRPCTransport) RoundTrip(request *http.Request) (*http.Response, e
 	}
 	if len(data) > maxRPCResponse {
 		return nil, errRPCResponseLimit
+	}
+	if observer != nil {
+		var envelope struct {
+			Error *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if response.StatusCode < 200 || response.StatusCode >= 300 || json.Unmarshal(data, &envelope) != nil || envelope.Error != nil {
+			observed = errors.New("ethereum RPC request failed")
+		}
 	}
 	response.Body = io.NopCloser(bytes.NewReader(data))
 	return response, nil

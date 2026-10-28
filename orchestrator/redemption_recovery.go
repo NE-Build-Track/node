@@ -206,19 +206,35 @@ func (r *redemptionRecovery) recordResult(ctx context.Context, result *eth.Trans
 		return err
 	}
 	defer tx.Rollback()
+	var transactionResult sql.Result
 	if phase == "mined" && result.TxHash != (common.Hash{}) {
-		_, err = tx.ExecContext(ctx, `UPDATE redemption_transactions SET phase='mined',error=NULL,acknowledged=1 WHERE hash=? AND phase NOT IN ('confirmed','reverted','superseded')`, result.TxHash.Hex())
+		transactionResult, err = tx.ExecContext(ctx, `UPDATE redemption_transactions SET phase='mined',error=NULL,acknowledged=1 WHERE hash=? AND phase NOT IN ('confirmed','reverted','superseded') AND (phase!='mined' OR acknowledged!=1 OR error IS NOT NULL)`, result.TxHash.Hex())
 	} else if phase == "retryable" {
-		_, err = tx.ExecContext(ctx, `UPDATE redemption_transactions SET phase=?,error=? WHERE root_hash=? AND phase IN ('prepared','broadcast','sending','submitted','mined')`, phase, message, root)
+		transactionResult, err = tx.ExecContext(ctx, `UPDATE redemption_transactions SET phase=?,error=? WHERE root_hash=? AND phase IN ('prepared','broadcast','sending','submitted','mined')`, phase, message, root)
 	}
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE redemption_attempts SET phase=?,error=? WHERE phase IN ('prepared','broadcast','submitted','mined') AND sig IN (SELECT sig FROM redemption_transactions WHERE root_hash=?) AND EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_transactions t ON t.hash=w.tx_hash WHERE w.sig=redemption_attempts.sig AND t.root_hash=?)`, phase, message, root, root)
+	summaryResult, err := tx.ExecContext(ctx, `UPDATE redemption_attempts SET phase=?,error=? WHERE phase IN ('prepared','broadcast','submitted','mined') AND (phase!=? OR error IS NOT ?) AND sig IN (SELECT sig FROM redemption_transactions WHERE root_hash=?) AND EXISTS(SELECT 1 FROM winning_tickets w JOIN redemption_transactions t ON t.hash=w.tx_hash WHERE w.sig=redemption_attempts.sig AND t.root_hash=?)`, phase, message, phase, message, root, root)
 	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	changed, _ := summaryResult.RowsAffected()
+	if transactionResult != nil {
+		n, _ := transactionResult.RowsAffected()
+		changed += n
+	}
+	if changed > 0 {
+		var failure error
+		if phase == "retryable" {
+			failure = result.Error()
+		}
+		r.store.observeTransition(phase, result.OriginHash().Hex(), failure)
+	}
+	return nil
 }
 
 func terminalRedemption(phase string) bool {

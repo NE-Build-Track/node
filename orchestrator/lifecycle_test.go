@@ -15,6 +15,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/livepeer/node/destination"
+	"github.com/livepeer/node/internal/observability"
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -54,7 +56,10 @@ func TestRunnerStopDrainsProxy(t *testing.T) {
 				})
 				w := httptest.NewRecorder()
 				go func() {
-					server.proxy(w, httptest.NewRequest(http.MethodPost, appURL, nil), transport, target, "", "r", sid, token, "")
+					registry.metrics.HTTP(w, httptest.NewRequest(http.MethodPost, appURL, nil), func(w http.ResponseWriter, r *http.Request) {
+						observability.App(r, registry.identity("r", sid))
+						server.proxy(w, r, transport, target, "", "r", sid, token, "")
+					})
 					done <- time.Now()
 				}()
 				<-started
@@ -75,6 +80,7 @@ func TestRunnerStopDrainsProxy(t *testing.T) {
 				}
 				require.Equal(t, scenario.delay, (<-done).Sub(released))
 				require.Equal(t, scenario.status, w.Code)
+				require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "app_calls_total", map[string]string{"outcome": "session_stopped"}))
 			})
 		})
 	}
@@ -83,7 +89,7 @@ func TestRunnerStopDrainsProxy(t *testing.T) {
 func TestReleaseCancelsActiveProxy(t *testing.T) {
 	for _, mode := range []string{"persistent", "single-shot"} {
 		for _, protocol := range []string{"http", "sse", "websocket"} {
-			for _, issuer := range []string{"client", "shutdown"} {
+			for _, issuer := range []string{"client", "shutdown", "expired", "health", "unregistered"} {
 				t.Run(mode+"/"+protocol+"/"+issuer, func(t *testing.T) {
 					started := make(chan http.Header, 1)
 					ended := make(chan struct{})
@@ -112,7 +118,14 @@ func TestReleaseCancelsActiveProxy(t *testing.T) {
 					policy, err := destination.New("runner", []string{strings.TrimPrefix(upstream.URL, "http://")})
 					require.NoError(t, err)
 					registry := NewRegistry("bootstrap", "http://orchestrator.example", time.Second, time.Minute)
-					require.NoError(t, registry.AddStatic(StaticRunner{ID: "runner", RunnerURL: upstream.URL, App: "test", Mode: mode, Capacity: 1}))
+					var credential string
+					if issuer == "expired" || issuer == "unregistered" {
+						registered, _, err := registry.Heartbeat(heartbeatRequest{RunnerID: "runner", RunnerURL: upstream.URL, App: "test", Mode: mode, Capacity: 1}, "bootstrap")
+						require.NoError(t, err)
+						credential = registered.HeartbeatSecret
+					} else {
+						require.NoError(t, registry.AddStatic(StaticRunner{ID: "runner", RunnerURL: upstream.URL, App: "test", Mode: mode, Capacity: 1}))
+					}
 					app := NewServer(registry, policy, policy, slog.New(slog.NewTextHandler(io.Discard, nil)))
 					server := httptest.NewServer(app)
 					defer server.Close()
@@ -123,7 +136,7 @@ func TestReleaseCancelsActiveProxy(t *testing.T) {
 						require.NoError(t, err)
 						path = "/apps/runner/session/" + sid + "/app"
 					}
-					clientDone := make(chan struct{})
+					clientDone, headersReady := make(chan struct{}), make(chan struct{})
 					if protocol == "websocket" {
 						conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+path, nil)
 						require.NoError(t, err)
@@ -134,6 +147,7 @@ func TestReleaseCancelsActiveProxy(t *testing.T) {
 							defer close(clientDone)
 							response, err := http.Get(server.URL + path)
 							if err == nil {
+								close(headersReady)
 								defer response.Body.Close()
 								_, _ = io.Copy(io.Discard, response.Body)
 							}
@@ -148,9 +162,40 @@ func TestReleaseCancelsActiveProxy(t *testing.T) {
 					sid := headers.Get("Livepeer-Session-Id")
 					require.NotEmpty(t, sid)
 					require.NotEmpty(t, headers.Get("Livepeer-Session-Token"))
-					if issuer == "shutdown" {
+					if protocol == "sse" {
+						select {
+						case <-headersReady:
+						case <-time.After(3 * time.Second):
+							t.Fatal("SSE headers did not arrive")
+						}
+					}
+					reason, outcome := "client_stop", "session_stopped"
+					switch issuer {
+					case "shutdown":
 						app.Close()
-					} else {
+						reason = "shutdown"
+					case "expired":
+						registry.mu.Lock()
+						registry.runners["runner"].Last = time.Now().Add(-2 * time.Minute)
+						registry.mu.Unlock()
+						registry.Expire()
+						reason, outcome = "runner_expired", "transport_error"
+					case "health":
+						registry.mu.Lock()
+						registry.runners["runner"].HealthURL = upstream.URL + "/healthz"
+						registry.mu.Unlock()
+						health := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+							return &http.Response{StatusCode: 503, Body: http.NoBody}, nil
+						})}
+						for range 3 {
+							registry.CheckStaticHealth(t.Context(), health)
+						}
+						reason, outcome = "runner_unhealthy", "transport_error"
+					case "unregistered":
+						_, err := registry.Unregister("runner", credential)
+						require.NoError(t, err)
+						reason = "runner_unregistered"
+					default:
 						response, err := http.Post(server.URL+"/apps/runner/session/"+sid+"/stop", "", nil)
 						require.NoError(t, err)
 						require.Equal(t, http.StatusOK, response.StatusCode)
@@ -169,6 +214,15 @@ func TestReleaseCancelsActiveProxy(t *testing.T) {
 					}
 					_, sessions := registry.Counts()
 					require.Zero(t, sessions)
+					require.Eventually(t, func() bool { return test.MetricSum(t, registry.metrics.Registry, "app_calls_total", nil) == 1 }, time.Second, time.Millisecond)
+					require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "app_calls_total", map[string]string{"outcome": outcome}))
+					require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "session_ends_total", map[string]string{"reason": reason}))
+					wantErrors := 0
+					if outcome == "transport_error" {
+						wantErrors = 1
+					}
+					require.EqualValues(t, wantErrors, test.MetricSum(t, registry.metrics.Registry, "stream_errors_total", nil))
+					require.Zero(t, test.MetricSum(t, registry.metrics.Registry, "app_calls_in_flight", nil))
 				})
 			}
 		}

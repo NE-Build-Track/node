@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -46,7 +47,17 @@ func TestRPCTransportPolicy(t *testing.T) {
 			rpc, err := NewRPC(parsed, nil)
 			require.NoError(t, err)
 			defer rpc.Close()
+			observed := 0
+			rpc.SetObserver(func(method string, elapsed time.Duration, observedErr error) {
+				observed++
+				require.Equal(t, "eth_chainId", method)
+				require.GreaterOrEqual(t, elapsed, time.Duration(0))
+				require.Error(t, observedErr)
+				require.NotContains(t, observedErr.Error(), "secret-")
+			})
 			_, err = rpc.ChainID(t.Context())
+			require.Equal(t, 1, observed)
+
 			require.ErrorContains(t, err, tc.error)
 			require.NotContains(t, err.Error(), "secret-password")
 			require.NotContains(t, err.Error(), "secret-token")

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/livepeer/node/internal/observability"
 )
 
 type SequenceStart int
@@ -152,11 +154,11 @@ func (c *TrickleSubscriber) SetSeq(seq int) {
 
 func (c *TrickleSubscriber) connect(ctx context.Context) (*http.Response, error) {
 	url := fmt.Sprintf("%s/%d", c.url, c.idx)
-	slog.Debug("preconnecting", "url", url)
+	slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("preconnecting")
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		slog.Error("Failed to create request for segment", "url", url, "err", err)
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("Failed to create request for segment", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		return nil, err
 	}
 
@@ -246,7 +248,7 @@ func (c *TrickleSubscriber) Read() (*http.Response, error) {
 	// TODO clean up this preconnect error handling!
 	hitMaxPreconnects := c.preconnectErrorCount > 5
 	if hitMaxPreconnects {
-		slog.Error("Hit max preconnect error", "url", c.url, "idx", c.idx)
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("Hit max preconnect error", "idx", c.idx)
 		return nil, fmt.Errorf("hit max preconnects")
 	}
 
@@ -254,7 +256,7 @@ func (c *TrickleSubscriber) Read() (*http.Response, error) {
 	conn := c.pendingGet
 	if conn == nil {
 		// Preconnect if we don't have a pending GET
-		slog.Debug("No preconnect, connecting", "url", c.url, "idx", c.idx)
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("No preconnect, connecting", "idx", c.idx)
 		p, err := c.preconnect()
 		if err != nil {
 			c.preconnectErrorCount++
@@ -292,7 +294,7 @@ func (c *TrickleSubscriber) Read() (*http.Response, error) {
 		defer c.mu.Unlock()
 		nextConn, err := c.preconnect()
 		if err != nil {
-			slog.Error("failed to preconnect next segment", "url", c.url, "idx", c.idx, "err", err)
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("failed to preconnect next segment", "idx", c.idx, "outcome", "error", "error_kind", observability.ErrorKind(err))
 			c.preconnectErrorCount++
 			return
 		}

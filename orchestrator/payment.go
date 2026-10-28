@@ -11,6 +11,7 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/livepeer/node/eth"
+	"github.com/livepeer/node/internal/observability"
 )
 
 func paymentPrice(price priceInfo) (int64, bool) {
@@ -39,7 +40,8 @@ func (s *Server) challenge(w http.ResponseWriter, r *http.Request, runnerID stri
 	wei, _ := paymentPrice(price)
 	challenge, err := s.payment.MakeChallenge(r.Context(), runnerID, manifest, ethcommon.HexToAddress(payerRaw), wei, price.Unit, s.registry.service)
 	if err != nil {
-		s.logger.Error("payment challenge failed", "runner_id", runnerID, "error", err)
+		observability.Outcome(r, paymentAppOutcome(err))
+		s.logger.Warn("payment challenge failed", "event", "payment_challenge", "operation", "challenge", "runner_id", runnerID, "outcome", paymentOutcome(err), "error_kind", observability.ErrorKind(err))
 		fail(w, 502, "payment challenge unavailable")
 		return
 	}
@@ -59,6 +61,7 @@ func (s *Server) paidReceipt(w http.ResponseWriter, r *http.Request, runnerID st
 		return "", false
 	}
 	if _, _, err := s.payment.Receive(r.Context(), runnerID, manifest, r.Header.Get("Livepeer-Payment"), r.Header.Get("Livepeer-Segment")); err != nil {
+		observability.Outcome(r, paymentAppOutcome(err))
 		status := http.StatusBadRequest
 		if errors.Is(err, ErrMissingChallenge) {
 			status = http.StatusNotFound
@@ -102,7 +105,7 @@ func (s *Server) reservePaid(w http.ResponseWriter, r *http.Request) bool {
 	}
 	id, appURL, controlURL, status, err := s.registry.reserveWithPrice(runnerID, manifest, &price)
 	if err != nil {
-		fail(w, status, err.Error())
+		failReservation(w, r, status, err)
 		return true
 	}
 	if _, ok := s.paidReceipt(w, r, runnerID, price); !ok {
@@ -110,6 +113,7 @@ func (s *Server) reservePaid(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	if err := s.payment.Charge(r.Context(), id, time.Now()); err != nil {
+		observability.Outcome(r, paymentAppOutcome(err))
 		s.registry.ReleaseBySession(id)
 		fail(w, 402, "insufficient payment balance")
 		return true
@@ -152,14 +156,15 @@ func (s *Server) proxyPaidSingleShot(w http.ResponseWriter, r *http.Request) boo
 	}
 	id, _, _, status, err := s.registry.reserveWithPrice(runnerID, manifest, &price)
 	if err != nil {
-		fail(w, status, err.Error())
+		failReservation(w, r, status, err)
 		return true
 	}
-	defer s.registry.ReleaseBySession(id)
+	defer s.registry.ReleaseBySession(id, "completed")
 	if _, ok := s.paidReceipt(w, r, runnerID, price); !ok {
 		return true
 	}
 	if err := s.payment.Charge(r.Context(), id, time.Now()); err != nil {
+		observability.Outcome(r, paymentAppOutcome(err))
 		fail(w, 402, "insufficient payment balance")
 		return true
 	}
@@ -230,8 +235,12 @@ func (s *Server) ChargePaidSessions(ctx context.Context) {
 	}
 	for _, id := range s.registry.PaidSessions() {
 		if err := s.payment.Charge(ctx, id, time.Now()); err != nil && !errors.Is(err, ErrFixedAlreadyCharged) {
-			s.logger.Warn("paid session ended", "session_id", id, "error", err)
-			s.registry.ReleaseBySession(id)
+			s.logger.Warn("paid session ended", "event", "payment_billing", "operation", "charge", "session_id", id, "outcome", paymentOutcome(err), "error_kind", observability.ErrorKind(err))
+			reason := "billing_error"
+			if errors.Is(err, ErrInsufficientBalance) {
+				reason = "insufficient_balance"
+			}
+			s.registry.ReleaseBySession(id, reason)
 		}
 	}
 }

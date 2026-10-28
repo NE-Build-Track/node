@@ -8,6 +8,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -53,5 +54,6 @@ func TestFeedUpdatesOnlyNewSessionPricesAndFailsClosedWhenStale(t *testing.T) {
 		require.NoError(t, err, "existing agreed prices must survive feed outages")
 		r.SetWeiPerUSD(big.NewRat(10800, 1))
 		require.Len(t, r.Discovery()[0].Runners, 1)
+		require.Zero(t, test.MetricSum(t, r.metrics.Registry, "price_feed_updates_total", nil), "setting a rate is not a feed read")
 	})
 }

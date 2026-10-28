@@ -51,8 +51,10 @@ omits the metadata entry or runner entries, respectively. Disabling both returns
 signers reject responses larger than 1 MiB.
 
 The loopback metrics listener defaults to `127.0.0.1:8940` and serves `/healthz`,
-`/readyz`, and `/metrics` (`livepeer_discovery_up`). Readiness indicates that the
-service is running, even with no available sources. The cache is not persisted.
+`/readyz`, and `/metrics`, including source health, cached inventory, refresh
+results, and `livepeer_discovery_up`. See [metrics and events](metrics.md).
+Readiness indicates that the service is running, even with no available sources.
+The cache is not persisted.
 
 ## Connect a signer
 

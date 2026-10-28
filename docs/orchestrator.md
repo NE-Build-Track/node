@@ -133,6 +133,10 @@ See [payment recovery](payment-recovery.md) for backup and reconciliation.
 
 ## Resource limits
 
+Paid `/readyz` returns 503 until payment dependencies and the redemption worker
+are ready. See [metrics and operational events](metrics.md) for requirements,
+app/runner measurements, queue monitoring, and scrape/query examples.
+
 The registry accepts up to 256 runners and 10,000 sessions, with 25 generated
 proxies per session. Control requests have 64 admission slots and a five-second
 body deadline. Streaming requests have 256 separate slots.

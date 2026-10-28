@@ -157,7 +157,5 @@ curl -fsS http://127.0.0.1:8940/readyz
 ```
 
 All metrics listeners serve `/healthz`, `/readyz`, and `/metrics`.
-Orchestrator and discovery readiness report that their listeners are running;
-they do not check runner health, upstream availability, or payment dependencies.
-Signer readiness checks its payment dependencies and, when enabled, local
-accounting storage. See the component guides for those checks.
+See [metrics and operational events](metrics.md) for readiness requirements,
+scrape configuration, measurements, and query/alert examples.

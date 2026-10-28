@@ -13,6 +13,7 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
 )
@@ -22,6 +23,8 @@ var maxWinProb = new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), 256), big.NewI
 // PaymentEngine owns process-local payment challenges and session accounting.
 // Winning tickets and redemption state are durable in the orchestrator redeemer.
 type PaymentEngine struct {
+	metrics       *observability.Metrics
+	identity      func(string, string) observability.Identity
 	mu            sync.Mutex
 	store         *RedeemerDB
 	chain         pm.PaymentChain
@@ -71,7 +74,13 @@ type Challenge struct {
 
 // MakeChallenge returns a Python/Go runner compatible 402 body. Ticket
 // parameters are authenticated by the recipient HMAC.
-func (e *PaymentEngine) MakeChallenge(ctx context.Context, runner, manifest string, payer ethcommon.Address, price int64, unit, service string) (Challenge, error) {
+func (e *PaymentEngine) MakeChallenge(ctx context.Context, runner, manifest string, payer ethcommon.Address, price int64, unit, service string) (challenge Challenge, result error) {
+	labels := e.paymentLabels(runner, manifest)
+	defer func() { e.recordPayment("challenge", result, labels) }()
+	return e.makeChallenge(ctx, runner, manifest, payer, price, unit, service)
+}
+
+func (e *PaymentEngine) makeChallenge(ctx context.Context, runner, manifest string, payer ethcommon.Address, price int64, unit, service string) (Challenge, error) {
 	if runner == "" || manifest == "" || payer == (ethcommon.Address{}) || price <= 0 || (unit != "seconds" && unit != "fixed") {
 		return Challenge{}, errors.New("invalid payment challenge scope")
 	}
@@ -105,7 +114,7 @@ func (e *PaymentEngine) MakeChallenge(ctx context.Context, runner, manifest stri
 	current := e.sessions[manifest]
 	if current == nil {
 		if len(e.sessions) >= 100000 {
-			return Challenge{}, errors.New("payment session capacity reached")
+			return Challenge{}, errPaymentSessionCapacity
 		}
 		current = &paymentSession{runner: runner, payer: payer, price: priceInfo, unit: unit, balance: new(big.Rat)}
 		e.sessions[manifest] = current
@@ -140,7 +149,9 @@ func (e *PaymentEngine) ChallengeForManifest(runner, manifest, service string) (
 	return paymentChallenge(runner, manifest, service, current.info), nil
 }
 
-func (e *PaymentEngine) RefreshChallenge(ctx context.Context, manifest string, payer ethcommon.Address, service string) (Challenge, error) {
+func (e *PaymentEngine) RefreshChallenge(ctx context.Context, manifest string, payer ethcommon.Address, service string) (challenge Challenge, result error) {
+	labels := e.paymentLabels("", manifest)
+	defer func() { e.recordPayment("refresh", result, labels) }()
 	e.mu.Lock()
 	current := e.sessions[manifest]
 	if current == nil {
@@ -152,7 +163,7 @@ func (e *PaymentEngine) RefreshChallenge(ctx context.Context, manifest string, p
 	if payer != expectedPayer {
 		return Challenge{}, ErrInvalidPayment
 	}
-	return e.MakeChallenge(ctx, runner, manifest, payer, price.PricePerUnit, unit, service)
+	return e.makeChallenge(ctx, runner, manifest, payer, price.PricePerUnit, unit, service)
 }
 
 func ManifestFromSegment(header string) (string, error) {
@@ -171,6 +182,8 @@ var ErrInvalidPayment = errors.New("invalid payment")
 var ErrInsufficientBalance = errors.New("insufficient payment balance")
 var ErrMissingChallenge = errors.New("payment challenge not found")
 var ErrFixedAlreadyCharged = errors.New("fixed-price session already charged")
+var errPaymentSessionCapacity = errors.New("payment session capacity reached")
+var errPaymentTicketCapacity = errors.New("payment ticket capacity reached")
 
 func decodeHeaders(paymentHeader, segmentHeader string) (wire.Payment, wire.SegData, error) {
 	paymentBytes, err := base64.StdEncoding.DecodeString(paymentHeader)
@@ -192,7 +205,9 @@ func decodeHeaders(paymentHeader, segmentHeader string) (wire.Payment, wire.SegD
 	return payment, segment, nil
 }
 
-func (e *PaymentEngine) Receive(ctx context.Context, runner, manifest, paymentHeader, segmentHeader string) (ethcommon.Address, *big.Rat, error) {
+func (e *PaymentEngine) Receive(ctx context.Context, runner, manifest, paymentHeader, segmentHeader string) (payerResult ethcommon.Address, credit *big.Rat, result error) {
+	labels := e.paymentLabels(runner, manifest)
+	defer func() { e.recordPayment("receive", result, labels) }()
 	payment, segment, err := decodeHeaders(paymentHeader, segmentHeader)
 	if err != nil {
 		return ethcommon.Address{}, nil, err
@@ -220,12 +235,12 @@ func (e *PaymentEngine) Receive(ctx context.Context, runner, manifest, paymentHe
 	}
 	funds, err := e.chain.PayerFunds(ctx, payer, e.recipient)
 	if err != nil {
-		return ethcommon.Address{}, nil, err
+		return ethcommon.Address{}, nil, paymentObservation{err, "error"}
 	}
 	snapshot := funds.Snapshot
 	active, err := e.chain.IsActiveAt(ctx, e.recipient, snapshot)
 	if err != nil {
-		return ethcommon.Address{}, nil, err
+		return ethcommon.Address{}, nil, paymentObservation{err, "error"}
 	}
 	if !active {
 		return ethcommon.Address{}, nil, ErrInvalidPayment
@@ -235,7 +250,7 @@ func (e *PaymentEngine) Receive(ctx context.Context, runner, manifest, paymentHe
 		return ethcommon.Address{}, nil, ErrInvalidPayment
 	}
 	if err := pm.ValidatePayerFunds(funds); err != nil {
-		return ethcommon.Address{}, nil, err
+		return ethcommon.Address{}, nil, paymentObservation{err, "rejected"}
 	}
 	if funds.Reserve.Cmp(params.FaceValue) < 0 || funds.Deposit.Cmp(params.FaceValue) < 0 {
 		return ethcommon.Address{}, nil, pm.ErrPayerUnavailable
@@ -252,7 +267,7 @@ func (e *PaymentEngine) Receive(ctx context.Context, runner, manifest, paymentHe
 		return ethcommon.Address{}, nil, ErrInvalidPayment
 	}
 	if e.nonceCount+len(payment.PayerParams) > 1000000 {
-		return ethcommon.Address{}, nil, errors.New("payment ticket capacity reached")
+		return ethcommon.Address{}, nil, errPaymentTicketCapacity
 	}
 	randKey := recipientRand.String()
 	previous := e.ticketNonces[randKey]
@@ -288,11 +303,21 @@ func (e *PaymentEngine) Receive(ctx context.Context, runner, manifest, paymentHe
 		previous.nonceSeen[nonce] = true
 	}
 	e.nonceCount += len(batchNonces)
+	e.metrics.Add("payment_credit_eth_total", observability.ETH(new(big.Rat).Sub(balance, session.balance)), labels)
+	e.metrics.Add("payment_tickets_total", float64(len(batchNonces)), labels.With("kind", "accepted"))
+	e.metrics.Add("payment_tickets_total", float64(len(winners)), labels.With("kind", "winning"))
 	session.balance, session.updated = balance, time.Now()
 	return payer, new(big.Rat).Set(balance), nil
 }
 
-func (e *PaymentEngine) Charge(ctx context.Context, manifest string, now time.Time) error {
+func (e *PaymentEngine) Charge(ctx context.Context, manifest string, now time.Time) (result error) {
+	labels := e.paymentLabels("", manifest)
+	observe := true
+	defer func() {
+		if observe {
+			e.recordPayment("charge", result, labels)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -306,6 +331,7 @@ func (e *PaymentEngine) Charge(ctx context.Context, manifest string, now time.Ti
 	if current.unit == "fixed" {
 		if !current.lastCharge.IsZero() {
 			current.updated = time.Now()
+			observe = false
 			return ErrFixedAlreadyCharged
 		}
 		units = 1
@@ -315,13 +341,25 @@ func (e *PaymentEngine) Charge(ctx context.Context, manifest string, now time.Ti
 			return ErrInsufficientBalance
 		}
 		if units == 0 {
+			observe = false
 			return nil
 		}
 		now = current.lastCharge.Add(time.Duration(units) * time.Second)
 	}
 	fee := new(big.Rat).Mul(big.NewRat(current.price.PricePerUnit, current.price.UnitsPerPrice), big.NewRat(units, 1))
+	if units == 0 {
+		observe = false
+	}
 	if current.balance.Cmp(fee) < 0 {
 		return ErrInsufficientBalance
+	}
+	e.metrics.Add("payment_charge_eth_total", observability.ETH(fee), labels)
+	if units > 0 {
+		if current.unit == "seconds" {
+			e.metrics.Add("payment_billed_seconds_total", float64(units), labels)
+		} else {
+			e.metrics.Add("payment_fixed_charges_total", float64(units), labels)
+		}
 	}
 	current.balance.Sub(current.balance, fee)
 	current.lastCharge, current.updated = now, time.Now()

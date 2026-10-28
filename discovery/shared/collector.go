@@ -5,20 +5,25 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"slices"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/livepeer/node/destination"
+	"github.com/livepeer/node/internal/observability"
 )
 
 // Snapshot is an immutable successful inventory observation.
 type Snapshot[R Runner] struct {
-	URL       string
-	QueriedAt time.Time
-	Entries   []Entry[R]
-	Failures  int
+	URL         string
+	QueriedAt   time.Time
+	Entries     []Entry[R]
+	Failures    int
+	LastSuccess time.Time
 }
 
 // Collector polls complete discovery endpoints and retains per-source inventories.
@@ -27,6 +32,7 @@ type Collector[R Runner] struct {
 	Client         *http.Client
 	Logger         *slog.Logger
 	MaxFailures    int
+	Observe        func(int, time.Duration, error)
 	mu             sync.Mutex
 	sources        []*Snapshot[R]
 	pending        chan struct{}
@@ -141,7 +147,11 @@ feedLoop:
 		}
 		workers.Go(func() {
 			defer func() { <-slots }()
+			started := time.Now()
 			entries, err := c.fetch(ctx, source.URL)
+			if c.Observe != nil {
+				c.Observe(index, time.Since(started), err)
+			}
 			if ctx.Err() != nil {
 				return
 			}
@@ -150,6 +160,7 @@ feedLoop:
 				if err == nil {
 					source.Entries = entries
 					source.QueriedAt = time.Now().UTC()
+					source.LastSuccess = source.QueriedAt
 					source.Failures = 0
 					c.initialized = true
 				} else {
@@ -166,12 +177,23 @@ feedLoop:
 				if logger == nil {
 					logger = slog.Default()
 				}
-				logger.WarnContext(ctx, "discovery refresh failed", "source_index", index, "error", err)
+				kind := observability.ErrorKind(err)
+				var dns *net.DNSError
+				if errors.Is(err, destination.ErrDeniedAddress) {
+					kind = "denied_destination"
+				} else if errors.As(err, &dns) {
+					kind = "dns"
+				} else if errors.Is(err, errInvalidRedirect) {
+					kind = "invalid_redirect"
+				}
+				logger.WarnContext(ctx, "discovery refresh failed", "event", "discovery_refresh", "operation", "refresh", "outcome", "error", "source_index", index, "error_kind", kind)
 			}
 		})
 	}
 	workers.Wait()
 }
+
+var errInvalidRedirect = errors.New("invalid discovery redirect URL")
 
 func (c *Collector[R]) fetch(ctx context.Context, endpoint string) ([]Entry[R], error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -186,7 +208,7 @@ func (c *Collector[R]) fetch(ctx context.Context, endpoint string) ([]Entry[R], 
 		}
 		// Go includes the raw Location URL in this error, even after unwrapping.
 		if strings.HasPrefix(err.Error(), "failed to parse Location header ") {
-			err = errors.New("invalid discovery redirect URL")
+			err = errInvalidRedirect
 		}
 		return nil, err
 	}

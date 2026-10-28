@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -41,4 +42,21 @@ func TestPendingPaymentDoesNotExposeOrBillSession(t *testing.T) {
 	require.Equal(t, token, reservedToken)
 	r.ReleaseBySession(id)
 	require.False(t, r.activateSession("r", id), "a released pending reservation cannot be resurrected")
+	for _, reason := range []string{"shutdown", "runner_expired", "runner_unregistered", "runner_unhealthy", "completed", "released", ""} {
+		id, _, _, _, err := r.reserveWithPrice("r", "pending-"+reason, &quote)
+		require.NoError(t, err)
+		want := reason
+		if reason == "completed" || reason == "released" || reason == "" {
+			want = "reservation_failed"
+		}
+		before := test.MetricSum(t, r.metrics.Registry, "session_ends_total", map[string]string{"reason": want})
+		if reason == "" {
+			r.ReleaseBySession(id)
+		} else {
+			r.ReleaseBySession(id, reason)
+		}
+		require.Equal(t, before+1, test.MetricSum(t, r.metrics.Registry, "session_ends_total", map[string]string{"reason": want}))
+	}
+	require.EqualValues(t, 1, test.MetricSum(t, r.metrics.Registry, "session_duration_seconds", nil), "only the activated session contributes duration")
+
 }

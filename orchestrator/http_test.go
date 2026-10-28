@@ -15,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/livepeer/node/destination"
+	"github.com/livepeer/node/internal/test"
 	"github.com/stretchr/testify/require"
 )
 
@@ -210,6 +211,11 @@ func TestSessionProxyStreamsSSEAndWebSocket(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, websocket.TextMessage, kind)
 	require.Equal(t, "echo", string(message))
+	require.NoError(t, conn.Close())
+	require.Eventually(t, func() bool { return test.MetricSum(t, registry.metrics.Registry, "app_calls_total", nil) == 2 }, time.Second, 10*time.Millisecond)
+	require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "app_calls_total", map[string]string{"protocol": "websocket"}))
+	require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "app_calls_total", map[string]string{"protocol": "sse", "outcome": "client_cancelled"}))
+	require.Zero(t, test.MetricSum(t, registry.metrics.Registry, "app_calls_in_flight", nil))
 }
 
 func TestRunnerDestinationDeniedWithoutGrant(t *testing.T) {
@@ -284,6 +290,14 @@ func TestGeneratedProxyHasSeparateDestinationGrant(t *testing.T) {
 	record = httptest.NewRecorder()
 	srv.ServeHTTP(record, httptest.NewRequest(http.MethodGet, "/proxy/"+created.ProxyID, nil))
 	require.Equal(t, http.StatusOK, record.Code)
+	create = httptest.NewRequest("POST", "/runner/"+registered.RunnerID+"/session/"+sid+"/channels", strings.NewReader(`{"channels":[{"name":"events"}]}`))
+	create.Header.Set("Livepeer-Session-Token", token)
+	record = httptest.NewRecorder()
+	srv.ServeHTTP(record, create)
+	require.Equal(t, 200, record.Code)
+	require.EqualValues(t, 1, test.MetricSum(t, registry.metrics.Registry, "trickle_channels", map[string]string{"kind": "session"}), "the replacement server owns the only snapshot")
+	_, err = registry.metrics.Registry.Gather()
+	require.NoError(t, err)
 }
 
 func TestRunnerExpires(t *testing.T) {
@@ -291,10 +305,15 @@ func TestRunnerExpires(t *testing.T) {
 	registered, _, err := registry.Heartbeat(heartbeatRequest{RunnerURL: "https://runner.example", App: "test", Mode: "persistent", Capacity: 1}, "bootstrap")
 	require.NoError(t, err)
 	require.NotEmpty(t, registered.RunnerID)
+	require.Len(t, test.MetricSamples(t, registry.metrics.Registry, "runner_sessions", map[string]string{"runner_id": registered.RunnerID, "state": "active"}), 1)
+	require.Zero(t, test.MetricSum(t, registry.metrics.Registry, "runner_sessions", nil))
 	time.Sleep(3 * time.Millisecond)
 	registry.Expire()
 	count, _ := registry.Counts()
 	require.Zero(t, count)
+	for _, name := range []string{"runner_registered", "runner_sessions", "runner_capacity_available"} {
+		require.Empty(t, test.MetricSamples(t, registry.metrics.Registry, name, nil))
+	}
 }
 
 func TestTrickleChannelsScopedToSession(t *testing.T) {

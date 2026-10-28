@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"log/slog"
 	"math"
 	"math/big"
@@ -13,6 +12,7 @@ import (
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/pm"
 	"github.com/livepeer/node/pm/wire"
 )
@@ -104,17 +104,17 @@ func (s *Service) preparePayment(ctx context.Context, paymentType, manifest stri
 		if errors.Is(err, pm.ErrRefreshRequired) {
 			return draftPayment{}, err
 		}
-		if f, ok := errors.AsType[paymentFailure](err); ok {
-			return draftPayment{}, f
+		if _, ok := errors.AsType[paymentFailure](err); ok {
+			return draftPayment{}, err
 		}
-		return draftPayment{}, invalid("payer funds unavailable")
+		return draftPayment{}, errors.Join(invalid("payer funds unavailable"), err)
 	}
 	count, err := pm.RemoteBatchSize(params, fee, balance)
 	if err != nil {
 		if errors.Is(err, pm.ErrNoTickets) {
 			return draftPayment{}, err
 		}
-		slog.WarnContext(ctx, "signer ticket batch rejected", "error", err)
+		slog.With("component", "signer", "event", "payment", "operation", "payment").WarnContext(ctx, "signer ticket batch rejected", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		return draftPayment{}, invalid("invalid ticket batch")
 	}
 	// Recheck the full batch before authorization. A later observation/funding failure
@@ -125,7 +125,7 @@ func (s *Service) preparePayment(ctx context.Context, paymentType, manifest stri
 	batch, remaining, err := pm.DraftRemoteBatch(params, s.key.Address(), state.TicketNonce, fee, balance)
 	if err != nil {
 		if !errors.Is(err, pm.ErrRefreshRequired) && !errors.Is(err, pm.ErrNoTickets) {
-			slog.ErrorContext(ctx, "signer ticket batch generation failed", "error", err)
+			slog.With("component", "signer", "event", "payment", "operation", "payment").ErrorContext(ctx, "signer ticket batch generation failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		}
 		return draftPayment{}, err
 	}
@@ -153,13 +153,14 @@ func (s *Service) preparePayment(ctx context.Context, paymentType, manifest stri
 
 // Sign adds signatures to the exact payment prepared before authorization.
 // It does not observe the clock or chain, or recalculate any payment values.
-func (p draftPayment) Sign(ctx context.Context, signer pm.TicketSigner) (signedPayment, error) {
+func (p draftPayment) Sign(ctx context.Context, signer pm.TicketSigner, metrics *observability.Metrics) (signedPayment, error) {
 	message := p.payment
 	message.PayerParams = make([]wire.TicketPayerParams, 0, len(p.batch.PayerParams))
 	for _, ticket := range p.batch.Tickets() {
 		sig, err := signer.SignMessage(ticket.Hash().Bytes())
+		metrics.Add("signer_sign_operations_total", 1, observability.Labels{"kind": "ticket", "outcome": observability.ErrorKind(err)})
 		if err != nil {
-			slog.ErrorContext(ctx, "signer ticket batch generation failed", "error", err)
+			slog.With("component", "signer", "event", "payment", "operation", "payment").ErrorContext(ctx, "signer ticket batch generation failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 			return signedPayment{}, err
 		}
 		message.PayerParams = append(message.PayerParams, wire.TicketPayerParams{TicketNonce: ticket.TicketNonce, Sig: sig})
@@ -167,8 +168,9 @@ func (p draftPayment) Sign(ctx context.Context, signer pm.TicketSigner) (signedP
 	flatten := append(slices.Clone(p.segment.ManifestID), make([]byte, 32)...)
 	flatten = append(flatten, p.segment.Hash...)
 	sig, err := signer.SignMessage(crypto.Keccak256(flatten))
+	metrics.Add("signer_sign_operations_total", 1, observability.Labels{"kind": "segment", "outcome": observability.ErrorKind(err)})
 	if err != nil {
-		slog.ErrorContext(ctx, "signer segment credential signing failed", "error", err)
+		slog.With("component", "signer", "event", "payment", "operation", "payment").ErrorContext(ctx, "signer segment credential signing failed", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		return signedPayment{}, err
 	}
 	segment := p.segment
@@ -187,25 +189,26 @@ func (s *Service) validateTicketParams(ctx context.Context, ticketParams *pm.Tic
 		return invalid("ticketParams expiration block is 0")
 	}
 	if s.paymentChain == nil {
-		slog.ErrorContext(ctx, "signer payer chain is not configured", "phase", phase)
-		return pm.ErrPayerUnavailable
+		slog.With("component", "signer", "event", "payment", "operation", "payment").ErrorContext(ctx, "signer payer chain is not configured", "phase", phase)
+		return errors.Join(pm.ErrPayerUnavailable, errPaymentService)
 	}
 	funds, err := s.paymentChain.PayerFunds(ctx, s.key.Address(), ticketParams.Recipient)
 	if err != nil {
-		slog.ErrorContext(ctx, "signer payer chain observation failed", "phase", phase, "error", err)
-		return fmt.Errorf("%w: chain observation failed", pm.ErrPayerUnavailable)
+		slog.With("component", "signer", "event", "payment", "operation", "payment").ErrorContext(ctx, "signer payer chain observation failed", "phase", phase, "outcome", "error", "error_kind", observability.ErrorKind(err))
+		return errors.Join(pm.ErrPayerUnavailable, errPaymentService)
 	}
 	if funds.Snapshot.Block == nil {
-		slog.ErrorContext(ctx, "signer payer chain observation has no L1 block", "phase", phase)
-		return fmt.Errorf("%w: chain observation failed", pm.ErrPayerUnavailable)
+		slog.With("component", "signer", "event", "payment", "operation", "payment").ErrorContext(ctx, "signer payer chain observation has no L1 block", "phase", phase)
+		return errors.Join(pm.ErrPayerUnavailable, errPaymentService)
 	}
+	s.observeFunds(funds, false)
 	latestL1Block := funds.Snapshot.Block
 	currentBuffer := new(big.Int).Sub(ticketParams.ExpirationBlock, latestL1Block).Int64()
 	if currentBuffer <= paramsExpiryBuffer {
 		return pm.ErrRefreshRequired
 	}
 	if err := s.payerPolicy.Check(*ticketParams, numTickets, funds); err != nil {
-		slog.WarnContext(ctx, "signer payer policy rejected ticket parameters", "phase", phase, "num_tickets", numTickets, "error", err)
+		slog.With("component", "signer", "event", "payment", "operation", "payment").WarnContext(ctx, "signer payer policy rejected ticket parameters", "phase", phase, "num_tickets", numTickets, "outcome", "error", "error_kind", observability.ErrorKind(err))
 		if errors.Is(err, pm.ErrPayerUnavailable) {
 			return err
 		}

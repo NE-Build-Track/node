@@ -1,12 +1,12 @@
 package signer
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,6 +15,8 @@ import (
 	"time"
 	"uuid"
 
+	"github.com/livepeer/node/internal/observability"
+	"github.com/livepeer/node/internal/test"
 	"github.com/livepeer/node/nodeconfig/migrations"
 	"github.com/segmentio/kafka-go"
 	"github.com/stretchr/testify/require"
@@ -157,10 +159,9 @@ func TestOutboxCapacityConcurrentAdmissionAndRecovery(t *testing.T) {
 	require.NoError(t, p.Enqueue(t.Context(), testEvent()))
 	require.False(t, p.ready(t.Context()))
 	require.Equal(t, uint64(9), p.enqueueFailures.Load())
-	var metrics bytes.Buffer
-	p.metrics(t.Context(), &metrics)
+	metrics := collectKafkaMetrics(t, p)
 	for _, want := range []string{"pending_events 3", fmt.Sprintf("pending_bytes %d", len(raw)*3), "oldest_event_age_seconds", "enqueue_errors_total 9", "publish_errors_total 0"} {
-		require.Contains(t, metrics.String(), want)
+		require.Contains(t, metrics, want)
 	}
 }
 
@@ -174,13 +175,14 @@ func TestOutboxStorageWriteFailureAndRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, p.ready(t.Context()), "readiness must recover without requiring traffic")
 	require.NoError(t, p.Enqueue(t.Context(), testEvent()))
-	var metrics bytes.Buffer
-	p.metrics(t.Context(), &metrics)
-	require.Contains(t, metrics.String(), "storage_errors_total 1")
+	metrics := collectKafkaMetrics(t, p)
+	require.Contains(t, metrics, "storage_errors_total 1")
 }
 
 func TestOutboxPartialDeliveryRetainsWholeBatch(t *testing.T) {
 	p := testKafkaProducer(t, 1<<20)
+	m := observability.New("signer")
+	m.Legacy(p.collectMetrics)
 	for range 3 {
 		require.NoError(t, p.Enqueue(t.Context(), testEvent()))
 	}
@@ -204,6 +206,7 @@ func TestOutboxPartialDeliveryRetainsWholeBatch(t *testing.T) {
 	retained, err := p.outbox.pending(t.Context())
 	require.NoError(t, err)
 	require.Equal(t, original, retained)
+	require.Zero(t, test.MetricSum(t, m.Registry, "signer_kafka_delivered_events_total", nil))
 	progress, err := p.publish(t.Context())
 	require.NoError(t, err)
 	require.True(t, progress)
@@ -212,6 +215,12 @@ func TestOutboxPartialDeliveryRetainsWholeBatch(t *testing.T) {
 	require.Zero(t, stats.Count)
 	require.Zero(t, stats.Bytes)
 	require.Equal(t, 2, calls)
+	require.EqualValues(t, 3, test.MetricSum(t, m.Registry, "signer_kafka_delivered_events_total", map[string]string{"component": "signer"}))
+	require.Positive(t, test.MetricSum(t, m.Registry, "signer_kafka_last_delivery_timestamp_seconds", map[string]string{"component": "signer"}))
+	require.Len(t, test.MetricSamples(t, m.Registry, "signer_kafka_pending_events", map[string]string{}), 1)
+	for _, label := range test.MetricSamples(t, m.Registry, "signer_kafka_pending_events", nil)[0].Label {
+		require.NotEqual(t, "component", label.GetName())
+	}
 }
 
 func TestPublisherBatchingAndCancellation(t *testing.T) {
@@ -264,4 +273,14 @@ func TestPublisherRetriesWithoutChangingEvent(t *testing.T) {
 	first, second := <-attempts, <-attempts
 	require.GreaterOrEqual(t, second.Sub(first), time.Second)
 	require.Equal(t, uint64(1), p.publishFailures.Load())
+}
+
+func collectKafkaMetrics(t *testing.T, p *kafkaProducer) string {
+	t.Helper()
+	m := observability.New("signer")
+	m.Legacy(p.collectMetrics)
+	response := httptest.NewRecorder()
+	m.Handler().ServeHTTP(response, httptest.NewRequest("GET", "/metrics", nil))
+	require.Equal(t, 200, response.Code, response.Body.String())
+	return response.Body.String()
 }

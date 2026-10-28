@@ -120,6 +120,7 @@ func TestRedemptionMigrationHistoryAndRollback(t *testing.T) {
 	files, err := fs.Sub(redeemerMigrationFiles, "migrations")
 	require.NoError(t, err)
 	require.NoError(t, migrations.Down(t.Context(), s.db, files))
+	require.NoError(t, migrations.Down(t.Context(), s.db, files))
 	// Seed a genuine v1 database, then upgrade without changing its ticket identity.
 	prepared, err := c.PrepareRedemption(t.Context(), key, big.NewInt(1), redeemTicket(ticket))
 	require.NoError(t, err)
@@ -127,11 +128,18 @@ func TestRedemptionMigrationHistoryAndRollback(t *testing.T) {
 	require.NoError(t, err)
 	_, err = s.db.Exec("UPDATE winning_tickets SET tx_hash=? WHERE sig=?", prepared.Hash.Hex(), ticket.Sig)
 	require.NoError(t, err)
+	backfillStart := time.Now().Add(-time.Second)
 	require.NoError(t, migrations.Up(t.Context(), s.db, files))
+	var enqueued string
+	require.NoError(t, s.db.QueryRow("SELECT enqueued_at FROM winning_tickets WHERE sig=?", ticket.Sig).Scan(&enqueued))
+	enqueuedAt, err := time.Parse(time.RFC3339Nano, enqueued)
+	require.NoError(t, err)
+	require.WithinRange(t, enqueuedAt, backfillStart, time.Now())
 	history, err := s.Redemptions()
 	require.NoError(t, err)
 	require.Equal(t, []RedemptionStatus{{Hash: prepared.Hash.Hex(), Phase: "submitted"}}, history)
 	// A lossless rollback remains possible with the original representable state.
+	require.NoError(t, migrations.Down(t.Context(), s.db, files))
 	require.NoError(t, migrations.Down(t.Context(), s.db, files))
 	require.NoError(t, migrations.Up(t.Context(), s.db, files))
 	_, err = s.db.Exec("UPDATE redemption_attempts SET phase='retryable' WHERE sig=?", ticket.Sig)
@@ -140,6 +148,7 @@ func TestRedemptionMigrationHistoryAndRollback(t *testing.T) {
 	next.Hash = ethcommon.HexToHash("0xabcdef")
 	next.Nonce = 1
 	require.NoError(t, s.recordPrepared(t.Context(), ticket, next))
+	require.NoError(t, migrations.Down(t.Context(), s.db, files))
 	require.ErrorContains(t, migrations.Down(t.Context(), s.db, files), "cannot_downgrade_redemption_transaction_history")
 	history, err = s.Redemptions()
 	require.NoError(t, err)
@@ -160,6 +169,7 @@ func TestRedemptionRollbackPreservesTransactionProgress(t *testing.T) {
 			require.EqualValues(t, 1, floor)
 			files, err := fs.Sub(redeemerMigrationFiles, "migrations")
 			require.NoError(t, err)
+			require.NoError(t, migrations.Down(t.Context(), s.db, files))
 			require.ErrorContains(t, migrations.Down(t.Context(), s.db, files), "cannot_downgrade_redemption_transaction_history")
 			floor, err = s.SavedNonceFloor(t.Context(), key.Address())
 			require.NoError(t, err)

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strconv"
@@ -156,11 +157,12 @@ func (s *RedeemerDB) reconcileFinalizedNonces(ctx context.Context, chain finaliz
 				}
 				continue
 			}
+			var retryResult sql.Result
 			tx, err := s.db.BeginTx(ctx, nil)
 			if err == nil {
 				_, err = tx.ExecContext(ctx, `UPDATE redemption_transactions SET phase='superseded',error=NULL WHERE hash=? AND phase NOT IN ('confirmed','reverted','superseded')`, item.hash.Hex())
 				if err == nil {
-					_, err = tx.ExecContext(ctx, `UPDATE redemption_attempts SET phase='retryable',error=NULL WHERE phase IN ('prepared','broadcast','submitted','mined') AND sig IN (SELECT sig FROM winning_tickets WHERE tx_hash=?)`, item.hash.Hex())
+					retryResult, err = tx.ExecContext(ctx, `UPDATE redemption_attempts SET phase='retryable',error=NULL WHERE phase IN ('prepared','broadcast','submitted','mined') AND sig IN (SELECT sig FROM winning_tickets WHERE tx_hash=?)`, item.hash.Hex())
 				}
 				if err == nil {
 					err = tx.Commit()
@@ -169,6 +171,10 @@ func (s *RedeemerDB) reconcileFinalizedNonces(ctx context.Context, chain finaliz
 			}
 			if err != nil {
 				failures = append(failures, err)
+			} else if retryResult != nil {
+				if n, _ := retryResult.RowsAffected(); n > 0 {
+					s.observeTransition("retryable", item.hash.Hex(), nil)
+				}
 			}
 		}
 	}

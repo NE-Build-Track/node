@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
+
+	"github.com/livepeer/node/internal/observability"
 )
 
 //lint:ignore ST1012 Preserve the public go-livepeer trickle API.
@@ -81,13 +83,13 @@ func (c *TricklePublisher) preconnect() (*pendingPost, error) {
 	index := c.index
 	url := fmt.Sprintf("%s/%d", c.baseURL, index)
 
-	slog.Debug("Preconnecting", "url", url)
+	slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Preconnecting")
 
 	errCh := make(chan error, 1)
 	pr, pw := io.Pipe()
 	req, err := http.NewRequest("POST", url, pr)
 	if err != nil {
-		slog.Error("Failed to create request for segment", "url", url, "err", err)
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("Failed to create request for segment", "outcome", "error", "error_kind", observability.ErrorKind(err))
 		return nil, err
 	}
 	req.Header.Set("Content-Type", c.contentType)
@@ -97,7 +99,7 @@ func (c *TricklePublisher) preconnect() (*pendingPost, error) {
 	go func() {
 		resp, err := httpclient.Do(req)
 		if err != nil {
-			slog.Error("Failed to complete POST for segment", "url", url, "err", err)
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("Failed to complete POST for segment", "outcome", "error", "error_kind", observability.ErrorKind(err))
 			_ = pr.CloseWithError(err)
 			errCh <- err
 			return
@@ -105,7 +107,7 @@ func (c *TricklePublisher) preconnect() (*pendingPost, error) {
 		isEOS := resp.Header.Get("Lp-Trickle-Closed") != ""
 		body, err := io.ReadAll(resp.Body)
 		if err != nil && !isEOS {
-			slog.Error("Error reading body", "url", url, "err", err)
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("Error reading body", "outcome", "error", "error_kind", observability.ErrorKind(err))
 			errCh <- err
 			return
 		}
@@ -117,7 +119,7 @@ func (c *TricklePublisher) preconnect() (*pendingPost, error) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			slog.Error("Failed POST segment", "url", url, "status_code", resp.StatusCode, "msg", string(body))
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Error("Failed POST segment", "status_code", resp.StatusCode)
 			if resp.StatusCode == http.StatusNotFound {
 				errCh <- StreamNotFoundErr
 				return
@@ -127,7 +129,7 @@ func (c *TricklePublisher) preconnect() (*pendingPost, error) {
 				return
 			}
 		} else {
-			slog.Debug("Uploaded segment", "url", url)
+			slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Uploaded segment")
 		}
 		errCh <- nil
 	}()
@@ -245,7 +247,7 @@ func (p *pendingPost) Write(data io.Reader) (int64, error) {
 	// if no io errors, close the writer
 	var closeErr error
 	if ioError == nil {
-		slog.Debug("Completed writing", "idx", index, "totalBytes", humanBytes(n))
+		slog.With("component", "trickle", "event", "stream", "operation", "stream").Debug("Completed writing", "idx", index, "totalBytes", humanBytes(n))
 
 		// Close the pipe writer to signal end of data for the current POST request
 		closeErr = writer.Close()

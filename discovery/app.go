@@ -86,11 +86,9 @@ func Serve(parent context.Context, p Params, logOut io.Writer) (result error) {
 	}
 	defer metricsListener.Close()
 	metrics := http.NewServeMux()
-	for path, body := range map[string]string{"/healthz": "ok\n", "/readyz": "ready\n", "/metrics": "livepeer_discovery_up 1\n"} {
+	metrics.Handle("GET /metrics", app.metrics.Handler())
+	for path, body := range map[string]string{"/healthz": "ok\n", "/readyz": "ready\n"} {
 		metrics.HandleFunc("GET "+path, func(w http.ResponseWriter, _ *http.Request) {
-			if path == "/metrics" {
-				w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-			}
 			_, _ = io.WriteString(w, body)
 		})
 	}

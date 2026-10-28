@@ -10,14 +10,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"math/big"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	"github.com/livepeer/node/internal/observability"
 	"github.com/livepeer/node/nodeconfig/migrations"
 	"github.com/livepeer/node/pm"
 	_ "modernc.org/sqlite"
@@ -29,6 +32,9 @@ var redeemerMigrationFiles embed.FS
 // RedeemerDB owns the orchestrator redeemer's durable winning-ticket queue,
 // redemption lifecycle, and chain activity observations.
 type RedeemerDB struct {
+	logger     *slog.Logger
+	metrics    *observability.Metrics
+	readiness  *paidReadiness
 	db         *sql.DB
 	recoveryMu sync.Mutex
 	recovery   *redemptionRecovery
@@ -113,10 +119,10 @@ func (s *RedeemerDB) StoreWinningTicket(t *pm.SignedTicket) error {
 		return err
 	}
 	_, err := s.db.Exec(`INSERT INTO winning_tickets
-		(payer_address,recipient,face_value,win_prob,ticket_nonce,recipient_rand,recipient_rand_hash,sig,creation_round,creation_round_block_hash,params_expiration_block)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?)`, t.PayerAddress.Hex(), t.Recipient.Hex(), t.FaceValue.Bytes(), t.WinProb.Bytes(),
+		(payer_address,recipient,face_value,win_prob,ticket_nonce,recipient_rand,recipient_rand_hash,sig,creation_round,creation_round_block_hash,params_expiration_block,enqueued_at)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, t.PayerAddress.Hex(), t.Recipient.Hex(), t.FaceValue.Bytes(), t.WinProb.Bytes(),
 		t.TicketNonce, t.RecipientRand.Bytes(), t.RecipientRandHash.Hex(), t.Sig, t.CreationRound,
-		t.CreationRoundBlockHash.Hex(), t.ParamsExpirationBlock.String())
+		t.CreationRoundBlockHash.Hex(), t.ParamsExpirationBlock.String(), time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -139,8 +145,8 @@ func (s *RedeemerDB) storeWinningTickets(ctx context.Context, payer ethcommon.Ad
 		return ErrInvalidPayment
 	}
 	for _, ticket := range tickets {
-		_, err := tx.Exec(`INSERT INTO winning_tickets(payer_address,recipient,face_value,win_prob,ticket_nonce,recipient_rand,recipient_rand_hash,sig,creation_round,creation_round_block_hash,params_expiration_block)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, payer.Hex(), ticket.Recipient.Hex(), ticket.FaceValue.Bytes(), ticket.WinProb.Bytes(), ticket.TicketNonce, ethcommon.LeftPadBytes(ticket.RecipientRand.Bytes(), 32), ticket.RecipientRandHash.Hex(), ticket.Sig, ticket.CreationRound, ticket.CreationRoundBlockHash.Hex(), ticket.ParamsExpirationBlock.String())
+		_, err := tx.Exec(`INSERT INTO winning_tickets(payer_address,recipient,face_value,win_prob,ticket_nonce,recipient_rand,recipient_rand_hash,sig,creation_round,creation_round_block_hash,params_expiration_block,enqueued_at)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, payer.Hex(), ticket.Recipient.Hex(), ticket.FaceValue.Bytes(), ticket.WinProb.Bytes(), ticket.TicketNonce, ethcommon.LeftPadBytes(ticket.RecipientRand.Bytes(), 32), ticket.RecipientRandHash.Hex(), ticket.Sig, ticket.CreationRound, ticket.CreationRoundBlockHash.Hex(), ticket.ParamsExpirationBlock.String(), time.Now().UTC().Format(time.RFC3339Nano))
 		if err != nil {
 			return err
 		}
